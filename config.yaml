@@ -1,0 +1,27 @@
+# ── the only knobs you touch per batch ──────────────────────────────────────
+name: 260410_BT-brain
+outdir: /hpc/temp/furlan_s/longread_WGS/{name}   # {name} is substituted
+rawdir: /fh/fast/furlan_s/SR/ngs/pacbio          # dir CONTAINING the r84265_* run folders
+runsheet: config/runsheet.csv
+default_sex: FEMALE                                # used only when a row's sex is blank
+hia5_gates_fiberseq: true                          # hia5=no -> WGS/SV/HLA only, skip FIRE
+
+# CONFIRM: gizmo Lmod init file so `ml` works in non-login shells
+module_init: /etc/profile.d/modules.sh
+
+# ── references / tools (stable across batches) ──────────────────────────────
+ref_fasta:     /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v2.0.0/GRCh38/human_GRCh38_no_alt_analysis_set.fasta
+fire_ref:      /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v2.0.0/GRCh38/human_GRCh38_no_alt_analysis_set.fasta
+hla_ref_fasta: /fh/fast/furlan_s/grp/refs/GRCh38/GRCh38_no_alt.fa
+chrom_sizes:   /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v2.0.0/GRCh38/chrom_sizes
+ccre_peaks:    /fh/fast/furlan_s/grp/experiments/tumor_fiberseq/SMHF/refs/cCRE_features.bed
+
+ref_map_file:      /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v2.0.0/GRCh38.ref_map.v2p0p0.tsv
+tertiary_map_file: /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v2.0.0/GRCh38.tertiary_map.v2p0p0.tsv
+wdl_singleton:     /home/sfurlan/develop/HiFi-human-WGS-WDL/workflows/singleton.wdl
+
+fire_pixi: /home/sfurlan/software/FIRE/pixi.toml
+
+cnv_excluded_regions: /home/sfurlan/develop/sawfish/data/cnv_excluded_regions/annotation_and_common_cnv.hg38.bed.gz
+expected_cn_xx:       /home/sfurlan/develop/sawfish/data/expected_cn/expected_cn.hg38.XX.bed
+expected_cn_xy:       /home/sfurlan/develop/sawfish/data/expected_cn/expected_cn.hg38.XY.bed
