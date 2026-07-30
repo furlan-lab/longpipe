@@ -1,0 +1,21 @@
+executor: slurm
+jobs: 100
+local-cores: 2
+latency-wait: 120
+keep-going: true
+rerun-incomplete: true
+printshellcmds: true
+show-failed-logs: true
+use-conda: true
+conda-frontend: mamba
+slurm-efficiency-report: true
+slurm-logdir: logs/slurm
+slurm-pass-command-as-script: true
+default-resources:
+  mem_mb: 4000
+  runtime: 60
+  slurm_partition: campus-new
+resources:
+  wdl_driver: 2
+  fire_driver: 1
+  io_heavy: 2

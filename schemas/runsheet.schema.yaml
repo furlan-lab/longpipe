@@ -1,0 +1,52 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+type: object
+additionalProperties: true
+required:
+  - core_name
+  - lab_name
+  - run
+  - cell
+  - barcode
+  - sex
+  - hia5
+properties:
+  core_name:
+    type: string
+  lab_name:
+    type: string
+  run:
+    type: string
+  cell:
+    type: string
+  barcode:
+    type: string
+  hifi_bam:
+    type: string
+  sex:
+    type: string
+    enum: ["", M, m, MALE, male, F, f, FEMALE, female]
+  hia5:
+    type: string
+    enum:
+      - "yes"
+      - "YES"
+      - "Yes"
+      - "y"
+      - "Y"
+      - "true"
+      - "TRUE"
+      - "True"
+      - "t"
+      - "T"
+      - "1"
+      - "no"
+      - "NO"
+      - "No"
+      - "n"
+      - "N"
+      - "false"
+      - "FALSE"
+      - "False"
+      - "f"
+      - "F"
+      - "0"

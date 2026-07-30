@@ -1,0 +1,12 @@
+name: longpipe
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+dependencies:
+  - python=3.12
+  - snakemake=9.24.0
+  - snakemake-executor-plugin-slurm
+  - pandas=2.3
+  - pyyaml
+  - mamba

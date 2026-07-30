@@ -1,311 +1,907 @@
-# =============================================================================
-# longpipe — long-read WGS + fiberseq/FIRE orchestrator
-#
-# Replaces the step-by-step runbook. One sample sheet + one config = the whole
-# DAG. `snakemake -n` previews it; `--rerun-incomplete --keep-going` resumes it.
-#
-# TOPOLOGY (important):
-#   Orchestrator steps (miniwdl driver, FIRE pixi) run as *local* rules on the
-#   submit node (rhino) and dispatch their own cluster jobs. Leaf tools
-#   (add-nucleosomes, sawfish, svtopo, hifihla, bedtools, kent) are submitted to
-#   SLURM by the executor. => Run the top-level snakemake ON rhino, not inside an
-#   salloc. Set --local-cores to how many WGS drivers you want running at once.
-#
-# KICKOFF: fill config/runsheet.csv with columns
-#   core_name,lab_name,run,cell,barcode,sex,hia5
-#   - label      = lab_name if given else core_name (downstream sample id)
-#   - hifi bam   = derived: {rawdir}/{run}/{cell}/hifi_reads/*hifi_reads.{barcode}.bam
-#   - hia5=no    => WGS/SV/HLA only; skips add-nucleosomes + FIRE branch
-#                  (toggle with hia5_gates_fiberseq in config)
-# =============================================================================
+import glob
+import json
+import os
+import re
+from pathlib import Path
 
-import os, glob, json
 import pandas as pd
+import yaml
+from snakemake.utils import min_version, validate
+
+
+min_version("8.6")
 
 configfile: "config/config.yaml"
 
-NAME     = config["name"]
-OUTDIR   = config["outdir"].format(name=NAME)
-RAWDIR   = config["rawdir"]                     # dir CONTAINING the r84265_* run folders
-RUNSHEET = config["runsheet"]
-HIA5_GATES = config.get("hia5_gates_fiberseq", True)
 
-FASTA    = config["ref_fasta"]
-HLA_REF  = config["hla_ref_fasta"]
-CHROMSZ  = config["chrom_sizes"]
-PEAKS    = config["ccre_peaks"]                 # rules use ${PEAKS}.gz (tabix'd)
-REFMAP   = config["ref_map_file"]
-TERTMAP  = config["tertiary_map_file"]
-WDL      = config["wdl_singleton"]
-FIRE_PIXI= config["fire_pixi"]
-FIRE_REF = config["fire_ref"]
-CNV_EXCL = config["cnv_excluded_regions"]
-EXP_CN   = {"MALE": config["expected_cn_xy"], "FEMALE": config["expected_cn_xx"]}
+WORKFLOW_ROOT = Path(str(workflow.source_path("Snakefile"))).resolve().parent
+CONFIG_SCHEMA = str(workflow.source_path("schemas/config.schema.yaml"))
+RUNSHEET_SCHEMA = str(workflow.source_path("schemas/runsheet.schema.yaml"))
 
-# CONFIRM: gizmo Lmod init so `ml` works in Snakemake's non-login shells.
-MODINIT  = config.get("module_init", "/etc/profile.d/modules.sh")
-shell.prefix(f'set -euo pipefail; source {MODINIT} >/dev/null 2>&1 || true; ')
+validate(config, CONFIG_SCHEMA)
 
-def act(env):
-    return f'set +u; eval "$(conda shell.bash hook)"; conda activate {env}; set -u; '
+
+def configured_path(value):
+    path = Path(os.path.expandvars(os.path.expanduser(str(value))))
+    if not path.is_absolute():
+        path = WORKFLOW_ROOT / path
+    return str(path.resolve())
+
+
+NAME = config["name"]
+OUTDIR = configured_path(config["outdir"].format(name=NAME))
+RAWDIR = configured_path(config["rawdir"])
+RUNSHEET = configured_path(config["runsheet"])
+
+HIA5_GATES = config["hia5_gates_fiberseq"]
+HLA_MODE = config["hla_mode"]
+SCATAC_SORTED = config["scatac_sorted"]
+FIRE_VERSION = config["fire_version"]
+
+FASTA = configured_path(config["ref_fasta"])
+FIRE_REF = configured_path(config["fire_ref"])
+HLA_REF = configured_path(config["hla_ref_fasta"])
+CHROM_SIZES = configured_path(config["chrom_sizes"])
+CCRE_PEAKS = configured_path(config["ccre_peaks"])
+REF_MAP = configured_path(config["ref_map_file"])
+TERTIARY_MAP = configured_path(config["tertiary_map_file"])
+WDL = configured_path(config["wdl_singleton"])
+FIRE_PIXI = configured_path(config["fire_pixi"])
+CNV_EXCLUDED = configured_path(config["cnv_excluded_regions"])
+EXPECTED_CN = {
+    "MALE": configured_path(config["expected_cn_xy"]),
+    "FEMALE": configured_path(config["expected_cn_xx"]),
+}
+
+COPY_PBWDL = configured_path(config["copy_pbwdl_tool"])
+SHRINK_FIRE_BED = configured_path(config["shrink_fire_bed_tool"])
+MINIWDL = os.path.expandvars(os.path.expanduser(config["miniwdl_executable"]))
+PIXI = os.path.expandvars(os.path.expanduser(config["pixi_executable"]))
+
+FIRE_PILEUP = (
+    f"fibertools/FIRE/results/{{sample}}/"
+    f"{{sample}}-fire-{FIRE_VERSION}-pileup.bed.gz"
+)
+FIRE_BIGWIG = (
+    f"fibertools/FIRE/results/bigwigs/"
+    f"{{sample}}-fire-{FIRE_VERSION}-pileup_shrunk.bw"
+)
+HAPLOTAGGED_BAM = (
+    "pacbiowdlR/{sample}/{sample}.GRCh38.haplotagged.bam"
+)
+HLA_JSON = "results/hla/{sample}_hifihla_report.json"
+HLA_REPORT = "results/hla/{sample}_hifihla_report.tsv"
+HLA_SUMMARY = "results/hla/{sample}_hifihla_summary.tsv"
+
+
+required_columns = {
+    "core_name",
+    "lab_name",
+    "run",
+    "cell",
+    "barcode",
+    "sex",
+    "hia5",
+}
+sample_table = pd.read_csv(RUNSHEET, dtype=str, keep_default_na=False)
+missing_columns = sorted(required_columns - set(sample_table.columns))
+if missing_columns:
+    raise ValueError(
+        f"{RUNSHEET}: missing required columns: {', '.join(missing_columns)}"
+    )
+
+validate(sample_table, RUNSHEET_SCHEMA)
+
+
+def sample_label(row):
+    lab_name = row["lab_name"].strip()
+    core_name = row["core_name"].strip()
+    if not (lab_name or core_name):
+        raise ValueError("each runsheet row needs core_name or lab_name")
+    return lab_name or core_name
+
+
+sample_table["label"] = sample_table.apply(sample_label, axis=1)
+invalid_labels = [
+    label
+    for label in sample_table["label"]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", label)
+]
+if invalid_labels:
+    raise ValueError(
+        "sample labels may contain only letters, digits, '.', '_', and '-': "
+        + ", ".join(invalid_labels)
+    )
+
+sample_table = sample_table.set_index("label", drop=False)
+duplicate_labels = sorted(
+    set(sample_table.index[sample_table.index.duplicated()].tolist())
+)
+if duplicate_labels:
+    raise ValueError(f"duplicate sample labels: {', '.join(duplicate_labels)}")
+if sample_table.empty:
+    raise ValueError(f"{RUNSHEET}: no samples found")
+
+SAMPLES = sample_table.index.tolist()
+
+
+def parse_boolean(value, field, sample):
+    normalized = str(value).strip().lower()
+    if normalized in {"y", "yes", "true", "t", "1"}:
+        return True
+    if normalized in {"n", "no", "false", "f", "0"}:
+        return False
+    raise ValueError(f"{sample}: invalid {field} value {value!r}")
+
+
+def is_hia5(sample):
+    return parse_boolean(sample_table.loc[sample, "hia5"], "hia5", sample)
+
+
+def uses_fiberseq(sample):
+    return not HIA5_GATES or is_hia5(sample)
+
+
+def sex_of(sample):
+    value = sample_table.loc[sample, "sex"].strip().upper()
+    if not value:
+        value = config["default_sex"]
+    aliases = {"M": "MALE", "MALE": "MALE", "F": "FEMALE", "FEMALE": "FEMALE"}
+    if value not in aliases:
+        raise ValueError(
+            f"{sample}: sex must be M, MALE, F, FEMALE, or blank; got {value!r}"
+        )
+    return aliases[value]
+
+
+def raw_hifi(sample):
+    row = sample_table.loc[sample]
+    explicit_bam = row.get("hifi_bam", "").strip()
+    if explicit_bam:
+        bam_path = configured_path(explicit_bam)
+        if not os.path.isfile(bam_path):
+            raise ValueError(f"{sample}: hifi_bam does not exist: {bam_path}")
+        return bam_path
+
+    missing_fields = [
+        field for field in ("run", "cell", "barcode") if not row[field].strip()
+    ]
+    if missing_fields:
+        raise ValueError(
+            f"{sample}: set hifi_bam or provide {', '.join(missing_fields)}"
+        )
+
+    barcode = re.sub(r"^bc-", "bc", row["barcode"].strip(), flags=re.IGNORECASE)
+    pattern = os.path.join(
+        RAWDIR,
+        row["run"].strip(),
+        row["cell"].strip(),
+        "hifi_reads",
+        f"*hifi_reads.{barcode}.bam",
+    )
+    matches = sorted(glob.glob(pattern))
+    if len(matches) != 1:
+        raise ValueError(
+            f"{sample}: expected exactly one HiFi BAM matching {pattern}; "
+            f"found {matches}"
+        )
+    return str(Path(matches[0]).resolve())
+
+
+def wgs_hifi(wildcards):
+    if uses_fiberseq(wildcards.sample):
+        return f"fibertools/{wildcards.sample}.nucleosomes.bam"
+    return raw_hifi(wildcards.sample)
+
+
+def svtopo_prefix(sample):
+    return sample.replace("_", "-")
+
+
+svtopo_prefixes = [svtopo_prefix(sample) for sample in SAMPLES]
+if len(svtopo_prefixes) != len(set(svtopo_prefixes)):
+    raise ValueError(
+        "sample labels collide after replacing underscores for SVTopo prefixes"
+    )
+
+FIRE_SAMPLES = [sample for sample in SAMPLES if uses_fiberseq(sample)]
+
+FIRE_TARGETS = (
+    expand(FIRE_PILEUP, sample=FIRE_SAMPLES)
+    + expand(FIRE_BIGWIG, sample=FIRE_SAMPLES)
+    + expand(
+        "fibertools/FIRE/scATAC_peak/{sample}_scATAC_max_scores.bed",
+        sample=FIRE_SAMPLES,
+    )
+)
+SV_TARGETS = (
+    expand("results/sv/{sample}.sawfish.vcf.gz", sample=SAMPLES)
+    + expand("results/sv/{sample}.sawfish.vcf.gz.tbi", sample=SAMPLES)
+    + expand("results/sv/{sample}.svtopo", sample=SAMPLES)
+)
+HLA_TARGETS = expand(HLA_JSON, sample=SAMPLES)
+
 
 workdir: OUTDIR
 
-# ── sample sheet: single source of truth ────────────────────────────────────
-samples = pd.read_csv(RUNSHEET, dtype=str).fillna("")
+shell.executable("/bin/bash")
+shell.prefix("set -euo pipefail; ")
 
-def _label(r):
-    lab, core = str(r.get("lab_name", "")).strip(), str(r.get("core_name", "")).strip()
-    if not (lab or core):
-        raise ValueError("each runsheet row needs core_name (lab_name optional)")
-    return lab or core
-
-samples["label"] = samples.apply(_label, axis=1)
-samples = samples.set_index("label", drop=False)
-if samples.index.duplicated().any():
-    raise ValueError(f"duplicate labels: {list(samples.index[samples.index.duplicated()])}")
-SAMPLES = list(samples.index)
-
-def _truthy(x):
-    return str(x).strip().lower() in ("y", "yes", "true", "t", "1")
-
-def is_hia5(label):
-    return _truthy(samples.loc[label, "hia5"])
-
-def fiberseq(label):
-    # a sample gets the fiberseq path (nucleosomes + FIRE) if Hia5-treated
-    # (or unconditionally, if the gate is turned off)
-    return (not HIA5_GATES) or is_hia5(label)
-
-FIRE_SAMPLES = [s for s in SAMPLES if fiberseq(s)]
-
-def raw_hifi(label):
-    r  = samples.loc[label]
-    bc = r["barcode"].replace("bc-", "bc")
-    # os.path.join drops RAWDIR automatically if `run` is an absolute path
-    pat = os.path.join(RAWDIR, r["run"], r["cell"], "hifi_reads", f"*hifi_reads.{bc}.bam")
-    hits = glob.glob(pat)
-    if len(hits) != 1:
-        raise ValueError(f"{label}: expected exactly 1 hifi bam matching {pat}, found {hits}")
-    return hits[0]
-
-def sex_of(label):
-    s = str(samples.loc[label, "sex"]).strip().upper()
-    if s in ("M", "MALE"):   return "MALE"
-    if s in ("F", "FEMALE"): return "FEMALE"
-    return config.get("default_sex", "FEMALE")
-
-def wgs_hifi(w):
-    # fiberseq samples feed the nucleosome bam to WGS; WGS-only samples feed raw hifi
-    return f"fibertools/{w.s}.nucleosomes.bam" if fiberseq(w.s) else raw_hifi(w.s)
-
-HAPBAM = "pacbiowdlR/{s}/{s}.GRCh38.haplotagged.bam"   # the fan-out point
+wildcard_constraints:
+    sample="[A-Za-z0-9][A-Za-z0-9._-]*"
 
 localrules: all, wdl_input, hifi_wgs, fire_config, fire
 
-# ── final targets ───────────────────────────────────────────────────────────
+
 rule all:
     input:
-        # FIRE branch — Hia5 samples only
-        expand("fibertools/FIRE/results/{s}/{s}-fire-v0.1.1-pileup.bed.gz", s=FIRE_SAMPLES),
-        expand("fibertools/FIRE/results/bigwigs/{s}-fire-v0.1.1-pileup_shrunk.bw", s=FIRE_SAMPLES),
-        expand("fibertools/FIRE/scATAC_peak/{s}_scATAC_max_scores.bed", s=FIRE_SAMPLES),
-        # SV branch — all samples
-        expand("sawfish/{s}_joint_call_dir/genotyped.sv.vcf.gz", s=SAMPLES),
-        expand("sawfish/{s}.svtopo.done", s=SAMPLES),
-        # HLA branch — all samples
-        expand("hla/{s}/{s}_hifihla.json", s=SAMPLES),
+        FIRE_TARGETS + SV_TARGETS + HLA_TARGETS
 
-# ── 1. add nucleosomes (GPU) — fiberseq samples only ────────────────────────
+
 rule add_nucleosomes:
-    input:  lambda w: raw_hifi(w.s)
-    output: "fibertools/{s}.nucleosomes.bam"
-    threads: 30
+    input:
+        bam=lambda wildcards: raw_hifi(wildcards.sample)
+    output:
+        "fibertools/{sample}.nucleosomes.bam"
+    threads: 16
     resources:
-        mem_mb_per_cpu=21000, runtime=180,
-        slurm_partition="campus-new",
-        slurm_extra="'--gres=gpu:1'",
+        mem_mb=64000,
+        runtime=240,
+        gpu=1
+    log:
+        "logs/add_nucleosomes/{sample}.log"
+    benchmark:
+        "benchmarks/add_nucleosomes/{sample}.tsv"
+    conda:
+        "envs/fibertools.yaml"
     shell:
-        "ml Python/3.11.5-GCCcore-13.2.0 CUDA/12.4.0; " + act("fibertools") +
-        "ft add-nucleosomes -t {threads} {input} > {output}"
+        """
+        mkdir -p "$(dirname {output:q})" "$(dirname {log:q})"
+        ft add-nucleosomes -t {threads} {input.bam:q} > {output:q} 2> {log:q}
+        test -s {output:q}
+        """
 
-# ── 2. HiFi-human-WGS-WDL (miniwdl driver = local; dispatches to cluster) ────
+
 rule wdl_input:
-    input:  wgs_hifi
-    output: "pbWGS/{s}/input.json"
+    input:
+        bam=wgs_hifi,
+        ref_map=REF_MAP,
+        tertiary_map=TERTIARY_MAP,
+        wdl=WDL
+    output:
+        "pbWGS/{sample}/input.json"
     run:
-        os.makedirs(os.path.dirname(output[0]), exist_ok=True)
-        d = {
-            "humanwgs_singleton.sample_id": wildcards.s,
-            "humanwgs_singleton.sex": sex_of(wildcards.s),
-            "humanwgs_singleton.hifi_reads": [os.path.abspath(input[0])],
-            "humanwgs_singleton.ref_map_file": REFMAP,
-            "humanwgs_singleton.tertiary_map_file": TERTMAP,
+        Path(output[0]).parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "humanwgs_singleton.sample_id": wildcards.sample,
+            "humanwgs_singleton.sex": sex_of(wildcards.sample),
+            "humanwgs_singleton.hifi_reads": [str(Path(input.bam).resolve())],
+            "humanwgs_singleton.ref_map_file": str(Path(input.ref_map).resolve()),
+            "humanwgs_singleton.tertiary_map_file": str(
+                Path(input.tertiary_map).resolve()
+            ),
             "humanwgs_singleton.backend": "HPC",
-            "humanwgs_singleton.preemptible": True,
+            "humanwgs_singleton.preemptible": config["wdl_preemptible"],
         }
-        with open(output[0], "w") as fh:
-            json.dump(d, fh, indent=2)
+        with open(output[0], "w", encoding="utf-8") as output_handle:
+            json.dump(payload, output_handle, indent=2)
+            output_handle.write("\n")
+
 
 rule hifi_wgs:
-    input:  bam=wgs_hifi, cfg="pbWGS/{s}/input.json"
-    # CONFIRM outputs.json location: some miniwdl versions nest a run subdir and
-    # the real file is pbWGS/{s}/_LAST/outputs.json — adjust here + copy_pbwdl if so.
-    output: "pbWGS/{s}/outputs.json"
+    input:
+        bam=wgs_hifi,
+        config="pbWGS/{sample}/input.json",
+        wdl=WDL
+    output:
+        "pbWGS/{sample}/outputs.json"
+    threads: 1
+    resources:
+        mem_mb=4000,
+        runtime=10080,
+        wdl_driver=1
+    params:
+        executable=MINIWDL,
+        run_dir="pbWGS/{sample}/runs"
+    log:
+        "logs/hifi_wgs/{sample}.log"
+    benchmark:
+        "benchmarks/hifi_wgs/{sample}.tsv"
     shell:
-        "ml Python/3.9.6-GCCcore-11.2.0; "
-        "source ~/.virtualenvs/hifi/bin/activate; "
-        "miniwdl run {WDL} -i {input.cfg} --dir pbWGS/{wildcards.s} --verbose"
+        """
+        mkdir -p {params.run_dir:q} "$(dirname {output:q})" "$(dirname {log:q})"
+        {params.executable:q} run {input.wdl:q} \
+            -i {input.config:q} \
+            --dir {params.run_dir:q} \
+            -o {output:q} \
+            --verbose > {log:q} 2>&1
+        test -s {output:q}
+        """
 
-# ── 3. extract WDL outputs -> haplotagged bam ───────────────────────────────
+
 rule copy_pbwdl:
-    input:  "pbWGS/{s}/outputs.json"
-    output: HAPBAM
-    threads: 20
-    resources: mem_mb_per_cpu=21000, runtime=60, slurm_partition="campus-new"
+    input:
+        outputs="pbWGS/{sample}/outputs.json",
+        tool=COPY_PBWDL
+    output:
+        HAPLOTAGGED_BAM
+    threads: 8
+    resources:
+        mem_mb=32000,
+        runtime=90,
+        io_heavy=1
+    log:
+        "logs/copy_pbwdl/{sample}.log"
+    benchmark:
+        "benchmarks/copy_pbwdl/{sample}.tsv"
     shell:
-        "~/develop/pacbiowdlR/copy_pbWDL -i {input} -o pacbiowdlR/{wildcards.s} -t {threads} -m"
+        """
+        mkdir -p "pacbiowdlR/{wildcards.sample}" "$(dirname {log:q})"
+        {input.tool:q} \
+            -i {input.outputs:q} \
+            -o "pacbiowdlR/{wildcards.sample}" \
+            -t {threads} -m > {log:q} 2>&1
+        test -s {output:q}
+        """
 
-# ── 4. FIRE (Hia5 samples at once; pixi/snakemake driver = local) ───────────
+
+rule haplotagged_bam_index:
+    input:
+        HAPLOTAGGED_BAM
+    output:
+        HAPLOTAGGED_BAM + ".bai"
+    threads: 8
+    resources:
+        mem_mb=16000,
+        runtime=60,
+        io_heavy=1
+    log:
+        "logs/haplotagged_bam_index/{sample}.log"
+    benchmark:
+        "benchmarks/haplotagged_bam_index/{sample}.tsv"
+    conda:
+        "envs/hifihla.yaml"
+    shell:
+        """
+        mkdir -p "$(dirname {log:q})"
+        samtools index -@ {threads} -o {output:q} {input:q} > {log:q} 2>&1
+        test -s {output:q}
+        """
+
+
 rule fire_config:
-    input:  expand(HAPBAM, s=FIRE_SAMPLES)
-    output: tbl="fibertools/FIRE/config.tbl", yaml="fibertools/FIRE/config.yaml"
+    input:
+        bams=expand(HAPLOTAGGED_BAM, sample=FIRE_SAMPLES),
+        reference=FIRE_REF,
+        pixi=FIRE_PIXI
+    output:
+        table="fibertools/FIRE/config.tbl",
+        config="fibertools/FIRE/config.yaml"
     run:
-        os.makedirs("fibertools/FIRE", exist_ok=True)
-        with open(output.tbl, "w") as t:
-            t.write("sample\tbam\n")
-            for s in FIRE_SAMPLES:
-                t.write(f"{s}\t{os.path.abspath(f'pacbiowdlR/{s}/{s}.GRCh38.haplotagged.bam')}\n")
-        with open(output.yaml, "w") as y:
-            y.write(f"ref: {FIRE_REF}\nref_name: hg38\nmanifest: {os.path.abspath(output.tbl)}\n")
+        Path(output.table).parent.mkdir(parents=True, exist_ok=True)
+        with open(output.table, "w", encoding="utf-8") as table_handle:
+            table_handle.write("sample\tbam\n")
+            for sample, bam_path in zip(FIRE_SAMPLES, input.bams):
+                table_handle.write(
+                    f"{sample}\t{Path(str(bam_path)).resolve()}\n"
+                )
+
+        fire_config = {
+            "ref": str(Path(input.reference).resolve()),
+            "ref_name": "hg38",
+            "manifest": str(Path(output.table).resolve()),
+        }
+        with open(output.config, "w", encoding="utf-8") as config_handle:
+            yaml.safe_dump(fire_config, config_handle, sort_keys=False)
+
 
 rule fire:
-    input:  tbl="fibertools/FIRE/config.tbl", yaml="fibertools/FIRE/config.yaml"
-    output: expand("fibertools/FIRE/results/{s}/{s}-fire-v0.1.1-pileup.bed.gz", s=FIRE_SAMPLES)
-    shell:
-        "cd fibertools/FIRE && "
-        "pixi run --manifest-path {FIRE_PIXI} slurm --configfile config.yaml -k"
-
-# ── 5a. bigwigs from FIRE pileups ───────────────────────────────────────────
-rule bigwig:
-    input:  "fibertools/FIRE/results/{s}/{s}-fire-v0.1.1-pileup.bed.gz"
-    output: "fibertools/FIRE/results/bigwigs/{s}-fire-v0.1.1-pileup_shrunk.bw"
-    threads: 10
-    resources: mem_mb_per_cpu=8000, runtime=30, slurm_partition="campus-new"
-    shell:
-        "ml Kent_tools/468-GCC-12.3.0; "
-        "mkdir -p fibertools/FIRE/results/bigwigs; "
-        "BG=fibertools/FIRE/results/bigwigs/{wildcards.s}-fire-v0.1.1-pileup_shrunk.bg; "
-        "~/develop/pacbiowdlR/shrink_fire_bed -c {CHROMSZ} {input} $BG -t {threads}; "
-        "bedGraphToBigWig $BG {CHROMSZ} {output}; rm $BG"
-
-# ── 5b. scATAC peak mapping from FIRE pileups ───────────────────────────────
-rule scatac:
-    input:  "fibertools/FIRE/results/{s}/{s}-fire-v0.1.1-pileup.bed.gz"
+    input:
+        table="fibertools/FIRE/config.tbl",
+        config="fibertools/FIRE/config.yaml",
+        pixi=FIRE_PIXI
     output:
-        mx="fibertools/FIRE/scATAC_peak/{s}_scATAC_max_scores.bed",
-        md="fibertools/FIRE/scATAC_peak/{s}_scATAC_median_scores.bed",
-        sm="fibertools/FIRE/scATAC_peak/{s}_scATAC_sum_scores.bed",
-    threads: 8
-    resources: mem_mb_per_cpu=21000, runtime=30, slurm_partition="campus-new"
+        expand(FIRE_PILEUP, sample=FIRE_SAMPLES)
+    threads: 1
+    resources:
+        mem_mb=4000,
+        runtime=10080,
+        fire_driver=1
+    params:
+        executable=PIXI
+    log:
+        "logs/fire/fire.log"
+    benchmark:
+        "benchmarks/fire.tsv"
     shell:
-        "ml BEDTools/2.31.0-GCC-12.3.0 HTSlib/1.19.1-GCC-13.2.0; "
-        "mkdir -p fibertools/FIRE/scATAC_peak; "
-        "bedtools map -a {PEAKS}.gz -b {input} -c 6 -o max    > {output.mx}; "
-        "bedtools map -a {PEAKS}.gz -b {input} -c 6 -o median > {output.md}; "
-        "bedtools map -a {PEAKS}.gz -b {input} -c 6 -o sum    > {output.sm}"
+        """
+        mkdir -p "$(dirname {log:q})"
+        (
+            cd fibertools/FIRE
+            {params.executable:q} run \
+                --manifest-path {input.pixi:q} \
+                slurm --configfile config.yaml --keep-going
+        ) > {log:q} 2>&1
+        """
 
-# ── 6. sawfish discover -> joint-call -> svtopo (all samples) ───────────────
-rule sawfish_discover:
-    input:  HAPBAM
-    output: directory("sawfish/{s}_discover")
-    params: cn=lambda w: EXP_CN[sex_of(w.s)]
-    threads: 30
-    resources: mem_mb_per_cpu=5000, runtime=120, slurm_partition="campus-new"
+
+rule fire_bigwig:
+    input:
+        pileup=FIRE_PILEUP,
+        chrom_sizes=CHROM_SIZES,
+        shrink_tool=SHRINK_FIRE_BED
+    output:
+        FIRE_BIGWIG
+    threads: 8
+    resources:
+        mem_mb=16000,
+        runtime=60,
+        io_heavy=1
+    log:
+        "logs/fire_bigwig/{sample}.log"
+    benchmark:
+        "benchmarks/fire_bigwig/{sample}.tsv"
+    conda:
+        "envs/intervals.yaml"
     shell:
-        "sawfish discover --threads {threads} --ref {FASTA} --bam {input} "
-        "--expected-cn {params.cn} --cnv-excluded-regions {CNV_EXCL} "
-        "--output-dir {output}"
+        """
+        mkdir -p "$(dirname {output:q})" "$(dirname {log:q})"
+        temporary_bedgraph="$(
+            mktemp "${{TMPDIR:-/tmp}}/{wildcards.sample}.fire.XXXXXX"
+        )"
+        trap 'rm -f "$temporary_bedgraph"' EXIT
+        (
+            {input.shrink_tool:q} \
+                -c {input.chrom_sizes:q} \
+                {input.pileup:q} \
+                "$temporary_bedgraph" \
+                -t {threads}
+            bedGraphToBigWig \
+                "$temporary_bedgraph" \
+                {input.chrom_sizes:q} \
+                {output:q}
+        ) > {log:q} 2>&1
+        test -s {output:q}
+        """
+
+
+rule scatac_map:
+    input:
+        peaks=CCRE_PEAKS,
+        pileup=FIRE_PILEUP,
+        chrom_sizes=CHROM_SIZES
+    output:
+        temp("fibertools/FIRE/scATAC_peak/{sample}.mapped.bed")
+    threads: 1
+    resources:
+        mem_mb=16000,
+        runtime=60
+    params:
+        sorted=int(SCATAC_SORTED)
+    log:
+        "logs/scatac_map/{sample}.log"
+    benchmark:
+        "benchmarks/scatac_map/{sample}.tsv"
+    conda:
+        "envs/intervals.yaml"
+    shell:
+        """
+        mkdir -p "$(dirname {output:q})" "$(dirname {log:q})"
+        if [[ {params.sorted} -eq 1 ]]; then
+            bedtools map \
+                -a {input.peaks:q} \
+                -b {input.pileup:q} \
+                -c 6,6,6 \
+                -o max,median,sum \
+                -sorted \
+                -g {input.chrom_sizes:q} \
+                > {output:q} 2> {log:q}
+        else
+            bedtools map \
+                -a {input.peaks:q} \
+                -b {input.pileup:q} \
+                -c 6,6,6 \
+                -o max,median,sum \
+                > {output:q} 2> {log:q}
+        fi
+        test -s {output:q}
+        """
+
+
+rule scatac_split:
+    input:
+        mapped="fibertools/FIRE/scATAC_peak/{sample}.mapped.bed"
+    output:
+        maximum="fibertools/FIRE/scATAC_peak/{sample}_scATAC_max_scores.bed",
+        median="fibertools/FIRE/scATAC_peak/{sample}_scATAC_median_scores.bed",
+        total="fibertools/FIRE/scATAC_peak/{sample}_scATAC_sum_scores.bed"
+    threads: 1
+    resources:
+        mem_mb=2000,
+        runtime=10
+    benchmark:
+        "benchmarks/scatac_split/{sample}.tsv"
+    conda:
+        "envs/intervals.yaml"
+    script:
+        "workflow/scripts/split_scatac_map.py"
+
+
+rule sawfish_discover:
+    input:
+        bam=HAPLOTAGGED_BAM,
+        bai=HAPLOTAGGED_BAM + ".bai",
+        reference=FASTA,
+        reference_index=FASTA + ".fai",
+        expected_cn=lambda wildcards: EXPECTED_CN[sex_of(wildcards.sample)],
+        excluded=CNV_EXCLUDED
+    output:
+        directory("sawfish/{sample}/discover")
+    threads: 24
+    resources:
+        mem_mb=64000,
+        runtime=240
+    log:
+        "logs/sawfish_discover/{sample}.log"
+    benchmark:
+        "benchmarks/sawfish_discover/{sample}.tsv"
+    conda:
+        "envs/sawfish.yaml"
+    shell:
+        """
+        mkdir -p "$(dirname {output:q})" "$(dirname {log:q})"
+        sawfish discover \
+            --threads {threads} \
+            --ref {input.reference:q} \
+            --bam {input.bam:q} \
+            --expected-cn {input.expected_cn:q} \
+            --cnv-excluded-regions {input.excluded:q} \
+            --output-dir {output:q} > {log:q} 2>&1
+        """
+
 
 rule sawfish_jointcall:
-    input:  "sawfish/{s}_discover"
-    output: "sawfish/{s}_joint_call_dir/genotyped.sv.vcf.gz"
-    threads: 30
-    resources: mem_mb_per_cpu=5000, runtime=120, slurm_partition="campus-new"
+    input:
+        discover="sawfish/{sample}/discover"
+    output:
+        directory("sawfish/{sample}/joint")
+    threads: 24
+    resources:
+        mem_mb=64000,
+        runtime=240
+    log:
+        "logs/sawfish_jointcall/{sample}.log"
+    benchmark:
+        "benchmarks/sawfish_jointcall/{sample}.tsv"
+    conda:
+        "envs/sawfish.yaml"
     shell:
-        "sawfish joint-call --threads {threads} --report-supporting-reads "
-        "--sample {input} --output-dir sawfish/{wildcards.s}_joint_call_dir"
+        """
+        mkdir -p "$(dirname {output:q})" "$(dirname {log:q})"
+        sawfish joint-call \
+            --threads {threads} \
+            --report-supporting-reads \
+            --sample {input.discover:q} \
+            --output-dir {output:q} > {log:q} 2>&1
+        test -s {output:q}/genotyped.sv.vcf.gz
+        test -s {output:q}/supporting_reads.json.gz
+        """
+
+
+rule publish_sawfish:
+    input:
+        joint="sawfish/{sample}/joint"
+    output:
+        vcf="results/sv/{sample}.sawfish.vcf.gz",
+        index="results/sv/{sample}.sawfish.vcf.gz.tbi",
+        reads="results/sv/{sample}.supporting_reads.json.gz"
+    threads: 1
+    resources:
+        mem_mb=4000,
+        runtime=30,
+        io_heavy=1
+    log:
+        "logs/publish_sawfish/{sample}.log"
+    benchmark:
+        "benchmarks/publish_sawfish/{sample}.tsv"
+    conda:
+        "envs/sawfish.yaml"
+    shell:
+        """
+        mkdir -p "$(dirname {output.vcf:q})" "$(dirname {log:q})"
+        (
+            cp {input.joint:q}/genotyped.sv.vcf.gz {output.vcf:q}
+            cp {input.joint:q}/supporting_reads.json.gz {output.reads:q}
+            tabix -f -p vcf {output.vcf:q}
+        ) > {log:q} 2>&1
+        test -s {output.vcf:q}
+        test -s {output.index:q}
+        test -s {output.reads:q}
+        """
+
 
 rule svtopo:
-    input:  bam=HAPBAM, vcf="sawfish/{s}_joint_call_dir/genotyped.sv.vcf.gz"
-    output: touch("sawfish/{s}.svtopo.done")   # CONFIRM svtopo's real output names
-    resources: mem_mb_per_cpu=5000, runtime=30, slurm_partition="campus-new"
+    input:
+        bam=HAPLOTAGGED_BAM,
+        bai=HAPLOTAGGED_BAM + ".bai",
+        vcf="results/sv/{sample}.sawfish.vcf.gz",
+        vcf_index="results/sv/{sample}.sawfish.vcf.gz.tbi",
+        reads="results/sv/{sample}.supporting_reads.json.gz",
+        excluded=CNV_EXCLUDED
+    output:
+        directory("results/sv/{sample}.svtopo")
+    threads: 1
+    resources:
+        mem_mb=6000,
+        runtime=60
+    params:
+        prefix=lambda wildcards: svtopo_prefix(wildcards.sample)
+    log:
+        "logs/svtopo/{sample}.log"
+    benchmark:
+        "benchmarks/svtopo/{sample}.tsv"
+    conda:
+        "envs/svtopo.yaml"
     shell:
-        "svtopo --bam {input.bam} --svtopo-dir sawfish/{wildcards.s}_joint_call_dir "
-        "--prefix {wildcards.s} "
-        "--variant-readnames sawfish/{wildcards.s}_joint_call_dir/supporting_reads.json.gz "
-        "--vcf {input.vcf} --exclude-regions {CNV_EXCL}"
+        """
+        mkdir -p "$(dirname {output:q})" "$(dirname {log:q})"
+        svtopo \
+            --bam {input.bam:q} \
+            --svtopo-dir {output:q} \
+            --prefix {params.prefix:q} \
+            --variant-readnames {input.reads:q} \
+            --vcf {input.vcf:q} \
+            --exclude-regions {input.excluded:q} > {log:q} 2>&1
+        find {output:q} -type f -size +0c -print -quit | grep -q .
+        """
 
-# ── 7. HLA (per-sample DAG — native deps replace hand-rolled afterok) ────────
-rule hla_pbindex:
-    input:  HAPBAM
-    output: "pacbiowdlR/{s}/{s}.GRCh38.haplotagged.bam.pbi"
-    threads: 30
-    resources: mem_mb_per_cpu=21000, runtime=60, slurm_partition="campus-new"
-    shell:  act("hifi-hla") + "pbindex -j {threads} {input}"
+
+rule haplotagged_bam_pbindex:
+    input:
+        HAPLOTAGGED_BAM
+    output:
+        HAPLOTAGGED_BAM + ".pbi"
+    threads: 8
+    resources:
+        mem_mb=16000,
+        runtime=60,
+        io_heavy=1
+    log:
+        "logs/haplotagged_bam_pbindex/{sample}.log"
+    benchmark:
+        "benchmarks/haplotagged_bam_pbindex/{sample}.tsv"
+    conda:
+        "envs/pbtk.yaml"
+    shell:
+        """
+        mkdir -p "$(dirname {log:q})"
+        pbindex -j {threads} {input:q} > {log:q} 2>&1
+        test -s {output:q}
+        """
+
 
 rule hla_fastq:
-    input:  bam=HAPBAM, pbi="pacbiowdlR/{s}/{s}.GRCh38.haplotagged.bam.pbi"
-    output: "fastq/{s}/{s}.fastq.gz"
-    threads: 30
-    resources: mem_mb_per_cpu=21000, runtime=120, slurm_partition="campus-new"
-    shell:  act("hifi-hla") + "bam2fastq -j {threads} {input.bam} -o fastq/{wildcards.s}/{wildcards.s}"
+    input:
+        bam=HAPLOTAGGED_BAM,
+        pbi=HAPLOTAGGED_BAM + ".pbi"
+    output:
+        temp("intermediate/hla/{sample}/{sample}.fastq.gz")
+    threads: 8
+    resources:
+        mem_mb=32000,
+        runtime=180,
+        io_heavy=1
+    params:
+        prefix="intermediate/hla/{sample}/{sample}"
+    log:
+        "logs/hla_fastq/{sample}.log"
+    benchmark:
+        "benchmarks/hla_fastq/{sample}.tsv"
+    conda:
+        "envs/pbtk.yaml"
+    shell:
+        """
+        mkdir -p "$(dirname {output:q})" "$(dirname {log:q})"
+        bam2fastq \
+            -j {threads} \
+            {input.bam:q} \
+            -o {params.prefix:q} > {log:q} 2>&1
+        test -s {output:q}
+        """
+
 
 rule hla_hifiasm:
-    input:  "fastq/{s}/{s}.fastq.gz"
-    output: h1="hifiasm/{s}/{s}.asm.bp.hap1.p_ctg.gfa",
-            h2="hifiasm/{s}/{s}.asm.bp.hap2.p_ctg.gfa"
-    threads: 30
-    resources: mem_mb_per_cpu=21000, runtime=480, slurm_partition="campus-new"
-    shell:  act("hifi-hla") + "hifiasm -o hifiasm/{wildcards.s}/{wildcards.s}.asm -t {threads} {input}"
-
-rule hla_gfa2fa:
-    input:  h1="hifiasm/{s}/{s}.asm.bp.hap1.p_ctg.gfa",
-            h2="hifiasm/{s}/{s}.asm.bp.hap2.p_ctg.gfa"
-    output: f1="hifiasm/{s}/{s}.asm.bp.hap1.p_ctg.fa",
-            f2="hifiasm/{s}/{s}.asm.bp.hap2.p_ctg.fa"
-    resources: mem_mb=4000, runtime=20, slurm_partition="campus-new"
+    input:
+        "intermediate/hla/{sample}/{sample}.fastq.gz"
+    output:
+        hap1="intermediate/hla/{sample}/{sample}.asm.bp.hap1.p_ctg.gfa",
+        hap2="intermediate/hla/{sample}/{sample}.asm.bp.hap2.p_ctg.gfa"
+    threads: 32
+    resources:
+        mem_mb=384000,
+        runtime=720
+    params:
+        prefix="intermediate/hla/{sample}/{sample}.asm"
+    log:
+        "logs/hla_hifiasm/{sample}.log"
+    benchmark:
+        "benchmarks/hla_hifiasm/{sample}.tsv"
+    conda:
+        "envs/hifiasm.yaml"
     shell:
-        r"""awk '/^S/{{print ">"$2;print $3}}' {input.h1} > {output.f1}
-awk '/^S/{{print ">"$2;print $3}}' {input.h2} > {output.f2}"""
+        """
+        mkdir -p "$(dirname {output.hap1:q})" "$(dirname {log:q})"
+        hifiasm \
+            -o {params.prefix:q} \
+            -t {threads} \
+            {input:q} > {log:q} 2>&1
+        test -s {output.hap1:q}
+        test -s {output.hap2:q}
+        """
 
-rule hla_align:
-    input:  f1="hifiasm/{s}/{s}.asm.bp.hap1.p_ctg.fa",
-            f2="hifiasm/{s}/{s}.asm.bp.hap2.p_ctg.fa"
-    output: "hifiasm/{s}/{s}.GRCh38.asm_sorted.bam"
-    threads: 30
-    resources: mem_mb_per_cpu=21000, runtime=180, slurm_partition="campus-new"
+
+rule hla_gfa_to_fasta:
+    input:
+        hap1="intermediate/hla/{sample}/{sample}.asm.bp.hap1.p_ctg.gfa",
+        hap2="intermediate/hla/{sample}/{sample}.asm.bp.hap2.p_ctg.gfa"
+    output:
+        hap1="intermediate/hla/{sample}/{sample}.asm.bp.hap1.p_ctg.fa",
+        hap2="intermediate/hla/{sample}/{sample}.asm.bp.hap2.p_ctg.fa"
+    threads: 1
+    resources:
+        mem_mb=8000,
+        runtime=30
+    log:
+        "logs/hla_gfa_to_fasta/{sample}.log"
+    benchmark:
+        "benchmarks/hla_gfa_to_fasta/{sample}.tsv"
     shell:
-        "ml SAMtools/1.11-GCC-10.2.0 minimap2/2.26-GCCcore-12.3.0; "
-        r'minimap2 -t {threads} -L --secondary=no --eqx -ax asm5 '
-        r'-R "@RG\tID:{wildcards.s}\tSM:{wildcards.s}" {HLA_REF} {input.f1} {input.f2} | '
-        "samtools sort -@ {threads} -o {output}"
+        """
+        mkdir -p "$(dirname {log:q})"
+        (
+            awk -F '\\t' '$1 == "S" {{print ">" $2 "\\n" $3}}' \
+                {input.hap1:q} > {output.hap1:q}
+            awk -F '\\t' '$1 == "S" {{print ">" $2 "\\n" $3}}' \
+                {input.hap2:q} > {output.hap2:q}
+        ) 2> {log:q}
+        test -s {output.hap1:q}
+        test -s {output.hap2:q}
+        """
 
-rule hla_index:
-    input:  "hifiasm/{s}/{s}.GRCh38.asm_sorted.bam"
-    output: "hifiasm/{s}/{s}.GRCh38.asm_sorted.bam.bai"
-    resources: mem_mb_per_cpu=21000, runtime=30, slurm_partition="campus-new"
-    shell:  "ml SAMtools/1.11-GCC-10.2.0; samtools index {input}"
 
-rule hla_call:
-    input:  bam="hifiasm/{s}/{s}.GRCh38.asm_sorted.bam",
-            bai="hifiasm/{s}/{s}.GRCh38.asm_sorted.bam.bai",
-            f1="hifiasm/{s}/{s}.asm.bp.hap1.p_ctg.fa",
-            f2="hifiasm/{s}/{s}.asm.bp.hap2.p_ctg.fa"
-    output: "hla/{s}/{s}_hifihla.json"   # CONFIRM hifihla's exact output suffix
-    threads: 30
-    resources: mem_mb_per_cpu=21000, runtime=120, slurm_partition="campus-new"
+rule hla_align_contigs:
+    input:
+        hap1="intermediate/hla/{sample}/{sample}.asm.bp.hap1.p_ctg.fa",
+        hap2="intermediate/hla/{sample}/{sample}.asm.bp.hap2.p_ctg.fa",
+        reference=HLA_REF
+    output:
+        "intermediate/hla/{sample}/{sample}.GRCh38.asm_sorted.bam"
+    threads: 20
+    resources:
+        mem_mb=64000,
+        runtime=240
+    params:
+        align_threads=16,
+        sort_threads=4,
+        sort_memory="8G"
+    log:
+        "logs/hla_align_contigs/{sample}.log"
+    benchmark:
+        "benchmarks/hla_align_contigs/{sample}.tsv"
+    conda:
+        "envs/hifihla.yaml"
     shell:
-        act("hifi-hla") +
-        "hifihla call-contigs --abam {input.bam} --hap1 {input.f1} --hap2 {input.f2} "
-        "--threads {threads} --out_prefix hla/{wildcards.s}/{wildcards.s}_hifihla"
+        r"""
+        mkdir -p "$(dirname {output:q})" "$(dirname {log:q})"
+        sort_prefix="${{TMPDIR:-/tmp}}/{wildcards.sample}.hla-sort"
+        minimap2 \
+            -t {params.align_threads} \
+            -L --secondary=no --eqx -ax asm5 \
+            -R '@RG\tID:{wildcards.sample}\tSM:{wildcards.sample}' \
+            {input.reference:q} \
+            {input.hap1:q} {input.hap2:q} 2>> {log:q} |
+        samtools sort \
+            -@ {params.sort_threads} \
+            -m {params.sort_memory} \
+            -T "$sort_prefix" \
+            -o {output:q} 2>> {log:q}
+        test -s {output:q}
+        """
+
+
+rule hla_contig_bam_index:
+    input:
+        "intermediate/hla/{sample}/{sample}.GRCh38.asm_sorted.bam"
+    output:
+        "intermediate/hla/{sample}/{sample}.GRCh38.asm_sorted.bam.bai"
+    threads: 8
+    resources:
+        mem_mb=16000,
+        runtime=60,
+        io_heavy=1
+    log:
+        "logs/hla_contig_bam_index/{sample}.log"
+    benchmark:
+        "benchmarks/hla_contig_bam_index/{sample}.tsv"
+    conda:
+        "envs/hifihla.yaml"
+    shell:
+        """
+        mkdir -p "$(dirname {log:q})"
+        samtools index -@ {threads} -o {output:q} {input:q} > {log:q} 2>&1
+        test -s {output:q}
+        """
+
+
+if HLA_MODE == "reads":
+
+    rule hla_call:
+        input:
+            bam=HAPLOTAGGED_BAM,
+            bai=HAPLOTAGGED_BAM + ".bai"
+        output:
+            json=HLA_JSON,
+            report=HLA_REPORT,
+            summary=HLA_SUMMARY
+        threads: 8
+        resources:
+            mem_mb=32000,
+            runtime=120
+        params:
+            prefix="results/hla/{sample}"
+        log:
+            "logs/hla_call/{sample}.log"
+        benchmark:
+            "benchmarks/hla_call/{sample}.tsv"
+        conda:
+            "envs/hifihla.yaml"
+        shell:
+            """
+            mkdir -p "$(dirname {output.json:q})" "$(dirname {log:q})"
+            hifihla call-reads \
+                --preset wgs \
+                -j {threads} \
+                -a {input.bam:q} \
+                -o {params.prefix:q} > {log:q} 2>&1
+            test -s {output.json:q}
+            test -s {output.report:q}
+            test -s {output.summary:q}
+            """
+
+else:
+
+    rule hla_call:
+        input:
+            bam="intermediate/hla/{sample}/{sample}.GRCh38.asm_sorted.bam",
+            bai="intermediate/hla/{sample}/{sample}.GRCh38.asm_sorted.bam.bai",
+            hap1="intermediate/hla/{sample}/{sample}.asm.bp.hap1.p_ctg.fa",
+            hap2="intermediate/hla/{sample}/{sample}.asm.bp.hap2.p_ctg.fa"
+        output:
+            json=HLA_JSON,
+            report=HLA_REPORT,
+            summary=HLA_SUMMARY
+        threads: 8
+        resources:
+            mem_mb=32000,
+            runtime=120
+        params:
+            prefix="results/hla/{sample}"
+        log:
+            "logs/hla_call/{sample}.log"
+        benchmark:
+            "benchmarks/hla_call/{sample}.tsv"
+        conda:
+            "envs/hifihla.yaml"
+        shell:
+            """
+            mkdir -p "$(dirname {output.json:q})" "$(dirname {log:q})"
+            hifihla call-contigs \
+                --abam {input.bam:q} \
+                --hap1 {input.hap1:q} \
+                --hap2 {input.hap2:q} \
+                --threads {threads} \
+                --out_prefix {params.prefix:q} > {log:q} 2>&1
+            test -s {output.json:q}
+            test -s {output.report:q}
+            test -s {output.summary:q}
+            """

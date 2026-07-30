@@ -1,0 +1,106 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+type: object
+additionalProperties: false
+required:
+  - name
+  - outdir
+  - rawdir
+  - runsheet
+  - ref_fasta
+  - fire_ref
+  - hla_ref_fasta
+  - chrom_sizes
+  - ccre_peaks
+  - ref_map_file
+  - tertiary_map_file
+  - wdl_singleton
+  - fire_pixi
+  - cnv_excluded_regions
+  - expected_cn_xx
+  - expected_cn_xy
+  - copy_pbwdl_tool
+  - shrink_fire_bed_tool
+properties:
+  name:
+    type: string
+    pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+  outdir:
+    type: string
+    minLength: 1
+  rawdir:
+    type: string
+    minLength: 1
+  runsheet:
+    type: string
+    minLength: 1
+  default_sex:
+    type: string
+    enum: [MALE, FEMALE]
+    default: FEMALE
+  hia5_gates_fiberseq:
+    type: boolean
+    default: true
+  hla_mode:
+    type: string
+    enum: [contigs, reads]
+    default: contigs
+  scatac_sorted:
+    type: boolean
+    default: true
+  fire_version:
+    type: string
+    pattern: "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+    default: v0.1.1
+  wdl_preemptible:
+    type: boolean
+    default: true
+  ref_fasta:
+    type: string
+    minLength: 1
+  fire_ref:
+    type: string
+    minLength: 1
+  hla_ref_fasta:
+    type: string
+    minLength: 1
+  chrom_sizes:
+    type: string
+    minLength: 1
+  ccre_peaks:
+    type: string
+    minLength: 1
+  ref_map_file:
+    type: string
+    minLength: 1
+  tertiary_map_file:
+    type: string
+    minLength: 1
+  wdl_singleton:
+    type: string
+    minLength: 1
+  fire_pixi:
+    type: string
+    minLength: 1
+  cnv_excluded_regions:
+    type: string
+    minLength: 1
+  expected_cn_xx:
+    type: string
+    minLength: 1
+  expected_cn_xy:
+    type: string
+    minLength: 1
+  miniwdl_executable:
+    type: string
+    minLength: 1
+    default: miniwdl
+  pixi_executable:
+    type: string
+    minLength: 1
+    default: pixi
+  copy_pbwdl_tool:
+    type: string
+    minLength: 1
+  shrink_fire_bed_tool:
+    type: string
+    minLength: 1
