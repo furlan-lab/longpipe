@@ -1,8 +1,6 @@
 # Batch settings
-name: 260410_BT-brain
-outdir: /hpc/temp/furlan_s/longread_WGS/{name}
 rawdir: /fh/fast/furlan_s/SR/ngs/pacbio
-runsheet: config/runsheet.csv
+runsheet: runsheet.csv
 default_sex: FEMALE
 hia5_gates_fiberseq: true
 hla_mode: contigs

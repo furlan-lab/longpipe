@@ -11,27 +11,39 @@ from snakemake.utils import min_version, validate
 
 min_version("8.6")
 
-configfile: "config/config.yaml"
-
-
 WORKFLOW_ROOT = Path(str(workflow.source_path("Snakefile"))).resolve().parent
 CONFIG_SCHEMA = str(workflow.source_path("schemas/config.schema.yaml"))
 RUNSHEET_SCHEMA = str(workflow.source_path("schemas/runsheet.schema.yaml"))
 
 validate(config, CONFIG_SCHEMA)
 
+required_environment = {
+    "LONGPIPE_RUN_DIR",
+    "LONGPIPE_RUN_NAME",
+    "LONGPIPE_RUNSHEET",
+    "LONGPIPE_SCRATCH_DIR",
+}
+missing_environment = sorted(required_environment - set(os.environ))
+if missing_environment:
+    raise ValueError(
+        "run this workflow through the longpipe CLI; missing environment: "
+        + ", ".join(missing_environment)
+    )
+
+RUN_DIRECTORY = Path(os.environ["LONGPIPE_RUN_DIR"]).resolve()
+
 
 def configured_path(value):
     path = Path(os.path.expandvars(os.path.expanduser(str(value))))
     if not path.is_absolute():
-        path = WORKFLOW_ROOT / path
+        path = RUN_DIRECTORY / path
     return str(path.resolve())
 
 
-NAME = config["name"]
-OUTDIR = configured_path(config["outdir"].format(name=NAME))
+NAME = os.environ["LONGPIPE_RUN_NAME"]
+OUTDIR = str(Path(os.environ["LONGPIPE_SCRATCH_DIR"]).resolve())
 RAWDIR = configured_path(config["rawdir"])
-RUNSHEET = configured_path(config["runsheet"])
+RUNSHEET = str(Path(os.environ["LONGPIPE_RUNSHEET"]).resolve())
 
 HIA5_GATES = config["hia5_gates_fiberseq"]
 HLA_MODE = config["hla_mode"]
@@ -58,16 +70,20 @@ SHRINK_FIRE_BED = configured_path(config["shrink_fire_bed_tool"])
 MINIWDL = os.path.expandvars(os.path.expanduser(config["miniwdl_executable"]))
 PIXI = os.path.expandvars(os.path.expanduser(config["pixi_executable"]))
 
-FIRE_PILEUP = (
+FIRE_RAW_PILEUP = (
     f"fibertools/FIRE/results/{{sample}}/"
     f"{{sample}}-fire-{FIRE_VERSION}-pileup.bed.gz"
 )
+FIRE_PILEUP = (
+    f"results/fire/pileups/"
+    f"{{sample}}-fire-{FIRE_VERSION}-pileup.bed.gz"
+)
 FIRE_BIGWIG = (
-    f"fibertools/FIRE/results/bigwigs/"
+    f"results/fire/bigwigs/"
     f"{{sample}}-fire-{FIRE_VERSION}-pileup_shrunk.bw"
 )
 HAPLOTAGGED_BAM = (
-    "pacbiowdlR/{sample}/{sample}.GRCh38.haplotagged.bam"
+    "results/wgs/{sample}/{sample}.GRCh38.haplotagged.bam"
 )
 HLA_JSON = "results/hla/{sample}_hifihla_report.json"
 HLA_REPORT = "results/hla/{sample}_hifihla_report.tsv"
@@ -210,7 +226,15 @@ FIRE_TARGETS = (
     expand(FIRE_PILEUP, sample=FIRE_SAMPLES)
     + expand(FIRE_BIGWIG, sample=FIRE_SAMPLES)
     + expand(
-        "fibertools/FIRE/scATAC_peak/{sample}_scATAC_max_scores.bed",
+        "results/fire/ccre/{sample}_scATAC_max_scores.bed",
+        sample=FIRE_SAMPLES,
+    )
+    + expand(
+        "results/fire/ccre/{sample}_scATAC_median_scores.bed",
+        sample=FIRE_SAMPLES,
+    )
+    + expand(
+        "results/fire/ccre/{sample}_scATAC_sum_scores.bed",
         sample=FIRE_SAMPLES,
     )
 )
@@ -334,12 +358,14 @@ rule copy_pbwdl:
         "logs/copy_pbwdl/{sample}.log"
     benchmark:
         "benchmarks/copy_pbwdl/{sample}.tsv"
+    params:
+        output_directory="results/wgs/{sample}"
     shell:
         """
-        mkdir -p "pacbiowdlR/{wildcards.sample}" "$(dirname {log:q})"
+        mkdir -p {params.output_directory:q} "$(dirname {log:q})"
         {input.tool:q} \
             -i {input.outputs:q} \
-            -o "pacbiowdlR/{wildcards.sample}" \
+            -o {params.output_directory:q} \
             -t {threads} -m > {log:q} 2>&1
         test -s {output:q}
         """
@@ -401,7 +427,7 @@ rule fire:
         config="fibertools/FIRE/config.yaml",
         pixi=FIRE_PIXI
     output:
-        expand(FIRE_PILEUP, sample=FIRE_SAMPLES)
+        expand(FIRE_RAW_PILEUP, sample=FIRE_SAMPLES)
     threads: 1
     resources:
         mem_mb=4000,
@@ -425,9 +451,31 @@ rule fire:
         """
 
 
+rule publish_fire_pileup:
+    input:
+        FIRE_RAW_PILEUP
+    output:
+        FIRE_PILEUP
+    threads: 1
+    resources:
+        mem_mb=4000,
+        runtime=30,
+        io_heavy=1
+    log:
+        "logs/publish_fire_pileup/{sample}.log"
+    benchmark:
+        "benchmarks/publish_fire_pileup/{sample}.tsv"
+    shell:
+        """
+        mkdir -p "$(dirname {output:q})" "$(dirname {log:q})"
+        cp {input:q} {output:q} > {log:q} 2>&1
+        test -s {output:q}
+        """
+
+
 rule fire_bigwig:
     input:
-        pileup=FIRE_PILEUP,
+        pileup=FIRE_RAW_PILEUP,
         chrom_sizes=CHROM_SIZES,
         shrink_tool=SHRINK_FIRE_BED
     output:
@@ -468,10 +516,10 @@ rule fire_bigwig:
 rule scatac_map:
     input:
         peaks=CCRE_PEAKS,
-        pileup=FIRE_PILEUP,
+        pileup=FIRE_RAW_PILEUP,
         chrom_sizes=CHROM_SIZES
     output:
-        temp("fibertools/FIRE/scATAC_peak/{sample}.mapped.bed")
+        temp("intermediate/fire/ccre/{sample}.mapped.bed")
     threads: 1
     resources:
         mem_mb=16000,
@@ -510,11 +558,11 @@ rule scatac_map:
 
 rule scatac_split:
     input:
-        mapped="fibertools/FIRE/scATAC_peak/{sample}.mapped.bed"
+        mapped="intermediate/fire/ccre/{sample}.mapped.bed"
     output:
-        maximum="fibertools/FIRE/scATAC_peak/{sample}_scATAC_max_scores.bed",
-        median="fibertools/FIRE/scATAC_peak/{sample}_scATAC_median_scores.bed",
-        total="fibertools/FIRE/scATAC_peak/{sample}_scATAC_sum_scores.bed"
+        maximum="results/fire/ccre/{sample}_scATAC_max_scores.bed",
+        median="results/fire/ccre/{sample}_scATAC_median_scores.bed",
+        total="results/fire/ccre/{sample}_scATAC_sum_scores.bed"
     threads: 1
     resources:
         mem_mb=2000,

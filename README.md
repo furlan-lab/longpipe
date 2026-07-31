@@ -1,45 +1,83 @@
 # longpipe
 
-`longpipe` is a Snakemake workflow for PacBio HiFi/Fiber-seq samples. It runs:
+`longpipe` runs a Snakemake workflow for PacBio HiFi and Fiber-seq samples. It
+includes:
 
 1. optional Fiber-seq nucleosome annotation;
 2. PacBio HiFi human WGS WDL through MiniWDL;
 3. FIRE, bigWig generation, and cCRE aggregation for Hia5 samples;
 4. Sawfish structural-variant calling and SVTopo extraction;
-5. HiFiHLA from either phased contigs or aligned reads.
+5. HiFiHLA from phased contigs or aligned reads.
 
-The top-level Snakemake process runs on the submit host. MiniWDL and FIRE are
-nested workflow drivers that submit their own jobs, while the remaining rules
-are submitted by Snakemake's SLURM executor.
+The top-level Snakemake process stays attached on the submit host. MiniWDL and
+FIRE are nested workflow drivers, while the remaining rules are submitted by
+Snakemake's SLURM executor.
 
-## Setup
+## Installation
 
-Create the workflow runner environment:
+Create the runner environment and install the command:
 
 ```bash
 mamba env create -f environment.yaml
 conda activate longpipe
+python -m pip install -e .
 ```
 
-The profile creates rule-specific Conda environments automatically. MiniWDL
-and FIRE remain externally managed because both need site-specific scheduler
-configuration:
-
-- set `miniwdl_executable` to the configured MiniWDL executable;
-- set `fire_pixi` to FIRE's `pixi.toml`;
-- ensure `pixi_executable` is available on the submit host;
-- set the two local helper paths at the bottom of `config/config.yaml`.
+The SLURM profile creates rule-specific Conda environments. MiniWDL and FIRE
+remain externally managed because both require site scheduler configuration.
+Set their executable and resource paths in each run's `config.yaml`.
 
 The WDL checkout, reference map, and tertiary map must come from the same
-HiFi-human-WGS-WDL resource release. Do not point an unpinned WDL checkout at
-maps from a different release.
+HiFi-human-WGS-WDL resource release.
 
-## Configuration
+## Storage Configuration
 
-Edit `config/config.yaml` for each batch. Relative paths are resolved from the
-repository root; absolute paths are recommended for shared HPC data.
+Longpipe separates durable project data from temporary workflow state. The
+site defaults are:
 
-`config/runsheet.csv` requires:
+```text
+project root: /fh/fast/furlan_s/project
+scratch root: /hpc/temp/furlan_s
+```
+
+Override them for another user or installation:
+
+```bash
+export LONGPIPE_PROJECT_ROOT=/fh/fast/$USER/project
+export LONGPIPE_SCRATCH_ROOT=/hpc/temp/$USER
+```
+
+The same values can be passed as `--project-root` and `--scratch-root` on the
+relevant commands. Longpipe rejects operations launched outside the configured
+project root.
+
+## Create A Run
+
+Create or choose a working directory below the project root, then initialize a
+named run:
+
+```bash
+cd /fh/fast/furlan_s/project/my-project
+longpipe setup 260410_BT-brain
+```
+
+This creates:
+
+```text
+260410_BT-brain/
+├── config.yaml
+└── runsheet.csv
+```
+
+`setup` refuses to overwrite an existing directory. Edit both files before
+starting the run. The CLI derives the run name and scratch location, so
+`config.yaml` does not contain `name` or `outdir`.
+
+Relative paths in `config.yaml` and `runsheet.csv` resolve from the durable run
+directory. Absolute paths are also supported. Source BAMs and reference data
+are read in place rather than staged into scratch.
+
+The runsheet requires:
 
 | Column | Meaning |
 | --- | --- |
@@ -53,72 +91,98 @@ repository root; absolute paths are recommended for shared HPC data.
 | `hia5` | Explicit yes/no value controlling the Fiber-seq branch |
 
 Labels must be unique and contain only letters, digits, `.`, `_`, and `-`.
-Configuration and runsheet schemas reject misspelled values before jobs launch.
+Configuration and runsheet schemas are checked before jobs launch.
 
-### HLA modes
+### HLA Modes
 
-- `hla_mode: contigs` preserves broad HiFiHLA locus coverage but performs a
-  whole-genome hifiasm assembly and is the expensive default.
-- `hla_mode: reads` calls directly from the aligned BAM and is much faster, but
-  HiFiHLA read mode is limited to HLA-A, HLA-B, and HLA-C.
+- `hla_mode: contigs` preserves broad HiFiHLA locus coverage but performs an
+  expensive whole-genome hifiasm assembly.
+- `hla_mode: reads` calls directly from the aligned BAM and is faster, but is
+  limited to HLA-A, HLA-B, and HLA-C.
 
-HiFiHLA is deprecated upstream in favor of PacBio StarPhase. Keep `contigs` if
-the broader HLA panel is required; otherwise prefer `reads`. A future WDL
-upgrade can replace this branch with StarPhase when its locus coverage matches
-the analysis requirements.
+## Run And Resume
 
-## Run
-
-Validate configuration and inspect the DAG without submitting jobs:
+Launch from the working directory containing the named run:
 
 ```bash
-snakemake --profile profiles/slurm --dry-run
-snakemake --profile profiles/slurm --summary
+longpipe run 260410_BT-brain
 ```
 
-Launch from the repository root on the SLURM submit host:
+The command remains attached until the workflow succeeds or fails. All active
+Snakemake state and intermediate files are written below:
+
+```text
+/hpc/temp/furlan_s/260410_BT-brain/
+```
+
+Longpipe snapshots the configuration and runsheet for every invocation.
+Changes to the durable files cannot affect an active invocation. A later
+`longpipe run` snapshots the current files and resumes the retained Snakemake
+state.
+
+To explicitly discard existing scratch state:
 
 ```bash
-snakemake --profile profiles/slurm
+longpipe run 260410_BT-brain --restart
 ```
 
-The configured `outdir` is the working directory. Rule logs and benchmarks are
-written under `<outdir>/logs` and `<outdir>/benchmarks`.
+Concurrent invocations with the same run name are rejected. Scratch ownership
+also prevents a run in another project directory from accidentally resuming or
+restarting the same scratch path.
 
-## Main outputs
+## Published Data
 
-- FIRE pileups: `fibertools/FIRE/results/<sample>/`
-- FIRE bigWigs: `fibertools/FIRE/results/bigwigs/`
-- cCRE summaries: `fibertools/FIRE/scATAC_peak/`
-- Sawfish VCFs: `results/sv/<sample>.sawfish.vcf.gz`
-- SVTopo artifacts: `results/sv/<sample>.svtopo/`
-- HiFiHLA reports: `results/hla/<sample>_hifihla_*`
+After a successful workflow, Longpipe stages and publishes:
 
-## Resource tuning
+```text
+260410_BT-brain/
+├── config.yaml
+├── runsheet.csv
+├── results/
+│   ├── fire/
+│   │   ├── pileups/
+│   │   ├── bigwigs/
+│   │   └── ccre/
+│   ├── hla/
+│   ├── sv/
+│   └── wgs/
+├── logs/
+├── benchmarks/
+└── run-metadata/
+```
 
-Rules request total memory with `mem_mb`; the SLURM executor maps this to
-`--mem`. The earlier per-CPU settings multiplied into several hundred GB per
-job. Cluster-specific settings now live in `profiles/slurm/config.yaml`.
+`run-metadata/` contains the latest status and versioned invocation records
+with the exact configuration, runsheet, and selected Snakemake metadata used
+for each launch.
 
-The profile also:
+On failure, Longpipe publishes logs, benchmarks, provenance, and failure status
+but does not publish partial scientific results. Scratch is retained after both
+success and failure.
 
-- limits concurrent nested MiniWDL drivers to two;
-- limits FIRE to one nested driver;
-- limits large copy/index operations to two;
-- requests one GPU only for `add_nucleosomes`;
-- emits a SLURM efficiency report for tuning from measured usage.
+Remove scratch explicitly after results have been checked:
 
-Adjust rule resources with profile `set-threads` and `set-resources` entries
-rather than adding cluster-specific partitions to the Snakefile.
+```bash
+longpipe clean 260410_BT-brain
+```
+
+This never removes durable configuration or published results.
+
+## Resource Tuning
+
+Rules request total memory with `mem_mb`; the SLURM executor maps it to
+`--mem`. Cluster-specific settings live in `profiles/slurm/config.yaml`. The
+profile limits concurrent nested MiniWDL and FIRE drivers, constrains large
+copy operations, requests a GPU only for nucleosome annotation, and emits a
+SLURM efficiency report.
 
 The cCRE rule performs one `bedtools map` pass for max, median, and sum. Keep
 `scatac_sorted: true` only when both the cCRE BED and FIRE pileups use the
-chromosome order in `chrom_sizes`; otherwise set it to `false`.
+chromosome order in `chrom_sizes`.
 
-## Recovery
+## Development
 
-The profile enables `--rerun-incomplete` and `--keep-going`. MiniWDL writes its
-declared output JSON directly to `pbWGS/<sample>/outputs.json`, while its
-timestamped run directories remain below `pbWGS/<sample>/runs/` for debugging.
-Snakemake tracks Sawfish, SVTopo, and HiFiHLA real outputs rather than marker
-files.
+Run the CLI tests with:
+
+```bash
+python -m unittest discover -s tests -v
+```
