@@ -27,7 +27,7 @@ expected_cn_xx: /home/sfurlan/develop/sawfish/data/expected_cn/expected_cn.hg38.
 expected_cn_xy: /home/sfurlan/develop/sawfish/data/expected_cn/expected_cn.hg38.XY.bed
 
 # Externally managed nested workflow drivers and local helper programs
-miniwdl_executable: /home/sfurlan/.virtualenvs/hifi/bin/miniwdl
+miniwdl_executable: /home/sfurlan/miniforge3/envs/miniwdl/bin/miniwdl
 pixi_executable: pixi
 copy_pbwdl_tool: /home/sfurlan/develop/pacbiowdlR/copy_pbWDL
 shrink_fire_bed_tool: /home/sfurlan/develop/pacbiowdlR/shrink_fire_bed
