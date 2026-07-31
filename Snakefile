@@ -11,24 +11,17 @@ from snakemake.utils import min_version, validate
 
 min_version("8.6")
 
+envvars:
+    "LONGPIPE_RUN_DIR",
+    "LONGPIPE_RUN_NAME",
+    "LONGPIPE_RUNSHEET",
+    "LONGPIPE_SCRATCH_DIR"
+
 WORKFLOW_ROOT = Path(str(workflow.source_path("Snakefile"))).resolve().parent
 CONFIG_SCHEMA = str(workflow.source_path("schemas/config.schema.yaml"))
 RUNSHEET_SCHEMA = str(workflow.source_path("schemas/runsheet.schema.yaml"))
 
 validate(config, CONFIG_SCHEMA)
-
-required_environment = {
-    "LONGPIPE_RUN_DIR",
-    "LONGPIPE_RUN_NAME",
-    "LONGPIPE_RUNSHEET",
-    "LONGPIPE_SCRATCH_DIR",
-}
-missing_environment = sorted(required_environment - set(os.environ))
-if missing_environment:
-    raise ValueError(
-        "run this workflow through the longpipe CLI; missing environment: "
-        + ", ".join(missing_environment)
-    )
 
 RUN_DIRECTORY = Path(os.environ["LONGPIPE_RUN_DIR"]).resolve()
 
@@ -38,6 +31,13 @@ def configured_path(value):
     if not path.is_absolute():
         path = RUN_DIRECTORY / path
     return str(path.resolve())
+
+
+def configured_executable(value):
+    executable = os.path.expandvars(os.path.expanduser(str(value)))
+    if os.sep not in executable:
+        return executable
+    return configured_path(executable)
 
 
 NAME = os.environ["LONGPIPE_RUN_NAME"]
@@ -54,7 +54,11 @@ FASTA = configured_path(config["ref_fasta"])
 FIRE_REF = configured_path(config["fire_ref"])
 HLA_REF = configured_path(config["hla_ref_fasta"])
 CHROM_SIZES = configured_path(config["chrom_sizes"])
-CCRE_PEAKS = configured_path(config["ccre_peaks"])
+CCRE_PEAKS = {
+    name: configured_path(path)
+    for name, path in config["ccre_peaks"].items()
+}
+CCRE_PEAK_SETS = list(CCRE_PEAKS)
 REF_MAP = configured_path(config["ref_map_file"])
 TERTIARY_MAP = configured_path(config["tertiary_map_file"])
 WDL = configured_path(config["wdl_singleton"])
@@ -67,8 +71,8 @@ EXPECTED_CN = {
 
 COPY_PBWDL = configured_path(config["copy_pbwdl_tool"])
 SHRINK_FIRE_BED = configured_path(config["shrink_fire_bed_tool"])
-MINIWDL = os.path.expandvars(os.path.expanduser(config["miniwdl_executable"]))
-PIXI = os.path.expandvars(os.path.expanduser(config["pixi_executable"]))
+MINIWDL = configured_executable(config["miniwdl_executable"])
+PIXI = configured_executable(config["pixi_executable"])
 
 FIRE_RAW_PILEUP = (
     f"fibertools/FIRE/results/{{sample}}/"
@@ -226,16 +230,19 @@ FIRE_TARGETS = (
     expand(FIRE_PILEUP, sample=FIRE_SAMPLES)
     + expand(FIRE_BIGWIG, sample=FIRE_SAMPLES)
     + expand(
-        "results/fire/ccre/{sample}_scATAC_max_scores.bed",
+        "results/fire/ccre/{peak_set}/{sample}_scATAC_max_scores.bed",
         sample=FIRE_SAMPLES,
+        peak_set=CCRE_PEAK_SETS,
     )
     + expand(
-        "results/fire/ccre/{sample}_scATAC_median_scores.bed",
+        "results/fire/ccre/{peak_set}/{sample}_scATAC_median_scores.bed",
         sample=FIRE_SAMPLES,
+        peak_set=CCRE_PEAK_SETS,
     )
     + expand(
-        "results/fire/ccre/{sample}_scATAC_sum_scores.bed",
+        "results/fire/ccre/{peak_set}/{sample}_scATAC_sum_scores.bed",
         sample=FIRE_SAMPLES,
+        peak_set=CCRE_PEAK_SETS,
     )
 )
 SV_TARGETS = (
@@ -252,7 +259,8 @@ shell.executable("/bin/bash")
 shell.prefix("set -euo pipefail; ")
 
 wildcard_constraints:
-    sample="[A-Za-z0-9][A-Za-z0-9._-]*"
+    sample="[A-Za-z0-9][A-Za-z0-9._-]*",
+    peak_set="[A-Za-z0-9][A-Za-z0-9._-]*"
 
 localrules: all, wdl_input, hifi_wgs, fire_config, fire
 
@@ -515,11 +523,11 @@ rule fire_bigwig:
 
 rule scatac_map:
     input:
-        peaks=CCRE_PEAKS,
+        peaks=lambda wildcards: CCRE_PEAKS[wildcards.peak_set],
         pileup=FIRE_RAW_PILEUP,
         chrom_sizes=CHROM_SIZES
     output:
-        temp("intermediate/fire/ccre/{sample}.mapped.bed")
+        temp("intermediate/fire/ccre/{peak_set}/{sample}.mapped.bed")
     threads: 1
     resources:
         mem_mb=16000,
@@ -527,9 +535,9 @@ rule scatac_map:
     params:
         sorted=int(SCATAC_SORTED)
     log:
-        "logs/scatac_map/{sample}.log"
+        "logs/scatac_map/{peak_set}/{sample}.log"
     benchmark:
-        "benchmarks/scatac_map/{sample}.tsv"
+        "benchmarks/scatac_map/{peak_set}/{sample}.tsv"
     conda:
         "envs/intervals.yaml"
     shell:
@@ -558,17 +566,26 @@ rule scatac_map:
 
 rule scatac_split:
     input:
-        mapped="intermediate/fire/ccre/{sample}.mapped.bed"
+        mapped="intermediate/fire/ccre/{peak_set}/{sample}.mapped.bed"
     output:
-        maximum="results/fire/ccre/{sample}_scATAC_max_scores.bed",
-        median="results/fire/ccre/{sample}_scATAC_median_scores.bed",
-        total="results/fire/ccre/{sample}_scATAC_sum_scores.bed"
+        maximum=(
+            "results/fire/ccre/{peak_set}/"
+            "{sample}_scATAC_max_scores.bed"
+        ),
+        median=(
+            "results/fire/ccre/{peak_set}/"
+            "{sample}_scATAC_median_scores.bed"
+        ),
+        total=(
+            "results/fire/ccre/{peak_set}/"
+            "{sample}_scATAC_sum_scores.bed"
+        )
     threads: 1
     resources:
         mem_mb=2000,
         runtime=10
     benchmark:
-        "benchmarks/scatac_split/{sample}.tsv"
+        "benchmarks/scatac_split/{peak_set}/{sample}.tsv"
     conda:
         "envs/intervals.yaml"
     script:

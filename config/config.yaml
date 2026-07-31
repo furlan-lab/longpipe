@@ -13,7 +13,8 @@ ref_fasta:     /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v2.0
 fire_ref:      /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v2.0.0/GRCh38/human_GRCh38_no_alt_analysis_set.fasta
 hla_ref_fasta: /fh/fast/furlan_s/grp/refs/GRCh38/GRCh38_no_alt.fa
 chrom_sizes:   /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v2.0.0/GRCh38/chrom_sizes
-ccre_peaks:    /fh/fast/furlan_s/grp/experiments/tumor_fiberseq/SMHF/refs/cCRE_features.bed.gz
+ccre_peaks:
+  encode: /fh/fast/furlan_s/grp/experiments/tumor_fiberseq/SMHF/refs/cCRE_features.bed.gz
 
 ref_map_file:      /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v2.0.0/GRCh38.ref_map.v2p0p0.tsv
 tertiary_map_file: /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v2.0.0/GRCh38.tertiary_map.v2p0p0.tsv

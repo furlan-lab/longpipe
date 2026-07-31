@@ -113,6 +113,10 @@ FIRE's user-facing outputs must be published below `results/fire/`, rather
 than retaining the workflow's current top-level `fibertools/FIRE` paths.
 Publish the final FIRE pileups, bigWigs, and cCRE summaries.
 
+`ccre_peaks` is a non-empty YAML mapping of filesystem-safe peak-set names to
+BED paths. Run cCRE aggregation for every Fiber-seq sample and every configured
+peak set, publishing each set below `results/fire/ccre/<peak-set>/`.
+
 Publish final Sawfish/SVTopo and HiFiHLA outputs below `results/sv/` and
 `results/hla/`, respectively. Also publish logs, benchmarks, Snakemake
 metadata needed for diagnosis, the configuration snapshot, and a clear run

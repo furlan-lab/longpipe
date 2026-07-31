@@ -77,6 +77,18 @@ Relative paths in `config.yaml` and `runsheet.csv` resolve from the durable run
 directory. Absolute paths are also supported. Source BAMs and reference data
 are read in place rather than staged into scratch.
 
+Configure one or more named cCRE peak sets as a YAML mapping:
+
+```yaml
+ccre_peaks:
+  encode: refs/encode_cCREs.bed.gz
+  brain: /fh/fast/shared/brain_cCREs.bed.gz
+```
+
+Each peak set is mapped against every Fiber-seq sample. Names may contain
+letters, digits, `.`, `_`, and `-`, and are used as output directory names
+below `results/fire/ccre/`.
+
 The runsheet requires:
 
 | Column | Meaning |
@@ -143,6 +155,8 @@ After a successful workflow, Longpipe stages and publishes:
 │   │   ├── pileups/
 │   │   ├── bigwigs/
 │   │   └── ccre/
+│   │       ├── encode/
+│   │       └── brain/
 │   ├── hla/
 │   ├── sv/
 │   └── wgs/

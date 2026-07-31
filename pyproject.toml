@@ -7,10 +7,13 @@ name = "longpipe"
 version = "0.1.0"
 description = "PacBio HiFi and Fiber-seq workflow runner"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 license = "GPL-3.0-only"
 dependencies = [
+  "pandas>=2.3",
   "PyYAML>=6",
+  "snakemake==9.24.0",
+  "snakemake-executor-plugin-slurm",
 ]
 
 [project.scripts]

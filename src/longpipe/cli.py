@@ -65,7 +65,9 @@ def _workflow_root() -> Path:
         ):
             return candidate
     checked = ", ".join(str(candidate) for candidate in candidates)
-    raise LongpipeError(f"could not locate Longpipe workflow resources; checked {checked}")
+    raise LongpipeError(
+        f"could not locate Longpipe workflow resources; checked {checked}"
+    )
 
 
 def _validate_run_name(run_name: str) -> None:
@@ -81,7 +83,10 @@ def _validate_working_directory(project_root_value: str) -> tuple[Path, Path]:
     working_directory = Path.cwd().resolve()
     if not project_root.is_dir():
         raise LongpipeError(f"configured project root does not exist: {project_root}")
-    if working_directory != project_root and project_root not in working_directory.parents:
+    if (
+        working_directory != project_root
+        and project_root not in working_directory.parents
+    ):
         raise LongpipeError(
             f"working directory must be within project root {project_root}; "
             f"got {working_directory}"
@@ -91,8 +96,17 @@ def _validate_working_directory(project_root_value: str) -> tuple[Path, Path]:
 
 def _run_directory(project_root_value: str, run_name: str) -> Path:
     _validate_run_name(run_name)
-    _, working_directory = _validate_working_directory(project_root_value)
-    return working_directory / run_name
+    project_root, working_directory = _validate_working_directory(project_root_value)
+    run_directory = working_directory / run_name
+    if run_directory.exists() or run_directory.is_symlink():
+        resolved = run_directory.resolve()
+        if resolved != project_root and project_root not in resolved.parents:
+            raise LongpipeError(
+                f"run directory resolves outside project root {project_root}: "
+                f"{run_directory}"
+            )
+        return resolved
+    return run_directory
 
 
 def _scratch_directory(scratch_root_value: str, run_name: str) -> tuple[Path, Path]:
@@ -168,7 +182,9 @@ def _read_owner(scratch_directory: Path) -> dict[str, object]:
         with owner_path.open(encoding="utf-8") as handle:
             owner = json.load(handle)
     except (OSError, json.JSONDecodeError) as error:
-        raise LongpipeError(f"invalid scratch ownership metadata: {owner_path}") from error
+        raise LongpipeError(
+            f"invalid scratch ownership metadata: {owner_path}"
+        ) from error
     if not isinstance(owner, dict):
         raise LongpipeError(f"invalid scratch ownership metadata: {owner_path}")
     return owner
@@ -177,6 +193,10 @@ def _read_owner(scratch_directory: Path) -> dict[str, object]:
 def _verify_owner(
     scratch_directory: Path, run_name: str, run_directory: Path
 ) -> dict[str, object]:
+    if scratch_directory.is_symlink():
+        raise LongpipeError(
+            f"refusing to use symlinked scratch path: {scratch_directory}"
+        )
     owner = _read_owner(scratch_directory)
     expected_directory = str(run_directory)
     if (
@@ -209,9 +229,13 @@ def _create_scratch(
 
 def _remove_scratch(scratch_root: Path, scratch_directory: Path) -> None:
     if scratch_directory.is_symlink():
-        raise LongpipeError(f"refusing to remove symlinked scratch path: {scratch_directory}")
+        raise LongpipeError(
+            f"refusing to remove symlinked scratch path: {scratch_directory}"
+        )
     if scratch_directory.parent != scratch_root:
-        raise LongpipeError(f"refusing to remove unsafe scratch path: {scratch_directory}")
+        raise LongpipeError(
+            f"refusing to remove unsafe scratch path: {scratch_directory}"
+        )
     shutil.rmtree(scratch_directory)
 
 
@@ -613,6 +637,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         return int(args.handler(args))
     except LongpipeError as error:
+        print(f"longpipe: error: {error}", file=sys.stderr)
+        return 2
+    except OSError as error:
         print(f"longpipe: error: {error}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:

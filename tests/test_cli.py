@@ -247,6 +247,32 @@ print("simulated workflow success")
         self.assertEqual(result, 2)
         self.assertIn("already active", error)
 
+    def test_symlinked_scratch_path_is_rejected(self):
+        self.setup_run(self.work_one, "linked-scratch")
+        self.scratch.mkdir()
+        outside_scratch = self.root / "outside-scratch"
+        outside_scratch.mkdir()
+        (self.scratch / "linked-scratch").symlink_to(
+            outside_scratch, target_is_directory=True
+        )
+
+        with working_directory(self.work_one):
+            result, _, error = self.invoke(self.run_arguments("linked-scratch"))
+        self.assertEqual(result, 2)
+        self.assertIn("symlinked scratch path", error)
+
+    def test_run_directory_cannot_escape_project_through_symlink(self):
+        outside_run = self.root / "outside-run"
+        outside_run.mkdir()
+        (self.work_one / "linked-run").symlink_to(
+            outside_run, target_is_directory=True
+        )
+
+        with working_directory(self.work_one):
+            result, _, error = self.invoke(self.run_arguments("linked-run"))
+        self.assertEqual(result, 2)
+        self.assertIn("resolves outside project root", error)
+
     def test_cli_managed_config_fields_are_rejected_before_scratch_creation(self):
         run_directory = self.setup_run(self.work_one, "reserved")
         config_path = run_directory / "config.yaml"
