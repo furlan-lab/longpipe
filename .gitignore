@@ -1,6 +1,8 @@
+.gitignore
 __pycache__/
 *.py[cod]
 *.egg-info/
 /.snakemake/
 /build/
 /dist/
+.DS_Store
