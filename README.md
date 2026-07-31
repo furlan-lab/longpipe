@@ -15,17 +15,52 @@ Snakemake's SLURM executor.
 
 ## Installation
 
-Create the runner environment and install the command:
+Install the command in an isolated pipx environment using Python 3.12:
 
 ```bash
-mamba env create -f environment.yaml
-conda activate longpipe
-python -m pip install -e .
+ml Python/3.12.3-GCCcore-13.3.0
+pipx install --python python3.12 .
+longpipe --version
 ```
 
-The SLURM profile creates rule-specific Conda environments. MiniWDL and FIRE
-remain externally managed because both require site scheduler configuration.
-Set their executable and resource paths in each run's `config.yaml`.
+This installs Longpipe, Snakemake, pandas, PyYAML, and the Snakemake SLURM
+executor without requiring `conda activate longpipe`. Run `pipx ensurepath`
+first if pipx's application directory is not already on `PATH`.
+
+### Python Module Bootstrap
+
+On a module-based HPC system, an existing `pipx` command may point to a
+different Python module. If pipx reports a missing `libpython` for an older
+Python version, bootstrap pipx using the same Python 3.12 module that will run
+Longpipe:
+
+```bash
+ml Python/3.12.3-GCCcore-13.3.0
+
+python3 -m venv "$HOME/.local/share/pipx-3.12"
+"$HOME/.local/share/pipx-3.12/bin/python" -m pip install --upgrade pip pipx
+mkdir -p "$HOME/.local/bin"
+ln -sf "$HOME/.local/share/pipx-3.12/bin/pipx" "$HOME/.local/bin/pipx"
+"$HOME/.local/share/pipx-3.12/bin/pipx" ensurepath
+hash -r
+
+pipx install --python "$(command -v python3)" .
+longpipe --version
+```
+
+Load `Python/3.12.3-GCCcore-13.3.0` before invoking pipx or Longpipe in future
+shells. Both virtual environments reference that module's Python installation.
+
+Conda is still required as a workflow deployment tool. The SLURM profile uses
+the environment definitions in `envs/` to create isolated Bioconda
+environments for tools such as fibertools-rs, hifiasm, HiFiHLA, samtools,
+bedtools, pbtk, Sawfish, and SVTopo. A working `conda` executable must
+therefore be available on the submit and compute nodes, but no Longpipe Conda
+environment needs to be activated.
+
+MiniWDL and FIRE remain externally managed because both require site scheduler
+configuration. Set their executable and resource paths in each run's
+`config.yaml`.
 
 The WDL checkout, reference map, and tertiary map must come from the same
 HiFi-human-WGS-WDL resource release.
