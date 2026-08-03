@@ -8,6 +8,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from importlib.metadata import version
 from pathlib import Path
 
 
@@ -89,6 +90,16 @@ print("simulated workflow success")
 
     def tearDown(self):
         self.temporary.cleanup()
+
+    def test_version_uses_installed_package_metadata(self):
+        stdout = io.StringIO()
+        with (
+            contextlib.redirect_stdout(stdout),
+            self.assertRaisesRegex(SystemExit, "0"),
+        ):
+            cli.main(["--version"])
+
+        self.assertEqual(stdout.getvalue().strip(), version("longpipe"))
 
     def invoke(self, arguments: list[str]) -> tuple[int, str, str]:
         stdout = io.StringIO()
