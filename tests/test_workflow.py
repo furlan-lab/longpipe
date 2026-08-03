@@ -14,6 +14,17 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSchemaTest(unittest.TestCase):
+    def test_slurm_profile_allows_ten_wdl_drivers(self):
+        profile = yaml.safe_load(
+            (REPOSITORY_ROOT / "profiles" / "slurm" / "config.yaml").read_text()
+        )
+
+        self.assertEqual(profile["resources"]["wdl_driver"], 10)
+        self.assertGreater(
+            profile["cores"], profile["resources"]["wdl_driver"]
+        )
+        self.assertEqual(profile["local-cores"], profile["cores"])
+
     def test_ccre_peaks_requires_nonempty_safe_name_mapping(self):
         from jsonschema import Draft202012Validator
 

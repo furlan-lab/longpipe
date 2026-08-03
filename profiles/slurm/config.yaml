@@ -1,5 +1,7 @@
 executor: slurm
 jobs: 100
+# Snakemake 9.24.0 uses cores to size its local worker pool in SLURM mode.
+cores: 11
 local-cores: 11
 latency-wait: 120
 keep-going: true

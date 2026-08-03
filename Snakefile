@@ -709,7 +709,7 @@ rule svtopo:
         "envs/svtopo.yaml"
     shell:
         """
-        mkdir -p "$(dirname {output:q})" "$(dirname {log:q})"
+        mkdir -p {output:q} "$(dirname {log:q})"
         svtopo \
             --bam {input.bam:q} \
             --svtopo-dir {output:q} \
