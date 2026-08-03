@@ -222,7 +222,8 @@ Rules request total memory with `mem_mb`; the SLURM executor maps it to
 `--mem`. Cluster-specific settings live in `profiles/slurm/config.yaml`. The
 profile limits concurrent nested MiniWDL and FIRE drivers, constrains large
 copy operations, requests a GPU only for nucleosome annotation, and emits a
-SLURM efficiency report.
+SLURM efficiency report. Up to ten sample-level MiniWDL workflows run at a
+time; each `hifi_wgs` job consumes one `wdl_driver` resource unit.
 
 The cCRE rule performs one `bedtools map` pass for max, median, and sum. Keep
 `scatac_sorted: true` only when both the cCRE BED and FIRE pileups use the

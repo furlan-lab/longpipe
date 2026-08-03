@@ -1,6 +1,6 @@
 executor: slurm
 jobs: 100
-local-cores: 2
+local-cores: 11
 latency-wait: 120
 keep-going: true
 rerun-incomplete: true
@@ -15,6 +15,6 @@ default-resources:
   runtime: 60
   slurm_partition: campus-new
 resources:
-  wdl_driver: 2
+  wdl_driver: 10
   fire_driver: 1
   io_heavy: 2
