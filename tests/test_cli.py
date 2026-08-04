@@ -55,6 +55,7 @@ class LongpipeCliTest(unittest.TestCase):
         self.fake_snakemake = self.root / "fake-snakemake"
         self.fake_snakemake.write_text(
             """#!/usr/bin/env python3
+import json
 import os
 import sys
 from pathlib import Path
@@ -74,6 +75,13 @@ counter_path.write_text(str(count))
 results = scratch / "results"
 (results / "fire").mkdir(parents=True, exist_ok=True)
 (results / "fire" / "result.txt").write_text(f"invocation {count}\\n")
+wgs = results / "wgs" / "sample"
+wgs.mkdir(parents=True, exist_ok=True)
+(wgs / "sample.bam").write_text("bam\\n")
+(wgs / "outputs.json").write_text(json.dumps({
+    "haplotagged_bam": str(wgs / "sample.bam"),
+    "sample_name": "sample",
+}))
 if os.environ.get("FAKE_LONGPIPE_RESULT") == "failure":
     print("simulated workflow failure")
     sys.exit(7)
@@ -173,6 +181,36 @@ print("simulated workflow success")
         self.assertEqual(
             (run_directory / "results" / "fire" / "result.txt").read_text(),
             "invocation 1\n",
+        )
+        published_wgs = run_directory / "results" / "wgs" / "sample"
+        published_manifest = json.loads(
+            (published_wgs / "outputs.json").read_text()
+        )
+        self.assertEqual(
+            published_manifest["haplotagged_bam"],
+            str(published_wgs / "sample.bam"),
+        )
+        self.assertEqual(published_manifest["sample_name"], "sample")
+        scratch_manifest = json.loads(
+            (
+                self.scratch
+                / "test-run"
+                / "results"
+                / "wgs"
+                / "sample"
+                / "outputs.json"
+            ).read_text()
+        )
+        self.assertEqual(
+            scratch_manifest["haplotagged_bam"],
+            str(
+                self.scratch
+                / "test-run"
+                / "results"
+                / "wgs"
+                / "sample"
+                / "sample.bam"
+            ),
         )
         self.assertTrue((run_directory / "logs" / "rules" / "fake.log").is_file())
         self.assertTrue((run_directory / "benchmarks" / "fake.tsv").is_file())

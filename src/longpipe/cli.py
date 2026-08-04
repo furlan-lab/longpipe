@@ -17,7 +17,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Callable, Iterator, Sequence
 
 import yaml
 
@@ -307,7 +307,12 @@ def _record_status(
     _atomic_write_json(run_directory / "run-metadata" / "status.json", status)
 
 
-def _replace_tree(source: Path, destination: Path, required: bool = False) -> None:
+def _replace_tree(
+    source: Path,
+    destination: Path,
+    required: bool = False,
+    prepare: Callable[[Path], None] | None = None,
+) -> None:
     if required and not source.is_dir():
         raise LongpipeError(f"expected workflow output directory is missing: {source}")
 
@@ -319,6 +324,8 @@ def _replace_tree(source: Path, destination: Path, required: bool = False) -> No
             shutil.copytree(source, stage)
         else:
             stage.mkdir()
+        if prepare is not None:
+            prepare(stage)
 
         had_destination = destination.exists() or destination.is_symlink()
         if had_destination:
@@ -345,6 +352,41 @@ def _replace_tree(source: Path, destination: Path, required: bool = False) -> No
                     backup.unlink()
             else:
                 os.replace(backup, destination)
+
+
+def _rewrite_published_wgs_manifests(
+    staged_results: Path, scratch_results: Path, durable_results: Path
+) -> None:
+    scratch_root = str(scratch_results)
+    durable_root = str(durable_results)
+    scratch_prefix = scratch_root + os.sep
+
+    def rewrite(value: object) -> object:
+        if isinstance(value, dict):
+            return {key: rewrite(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [rewrite(item) for item in value]
+        if isinstance(value, str):
+            if value == scratch_root:
+                return durable_root
+            if value.startswith(scratch_prefix):
+                return durable_root + os.sep + value[len(scratch_prefix) :]
+        return value
+
+    for manifest in sorted((staged_results / "wgs").glob("*/outputs.json")):
+        try:
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise LongpipeError(
+                f"could not read WGS output manifest {manifest}: {error}"
+            ) from error
+        if not isinstance(payload, dict):
+            raise LongpipeError(
+                f"WGS output manifest is not a JSON object: {manifest}"
+            )
+        rewritten = rewrite(payload)
+        assert isinstance(rewritten, dict)
+        _atomic_write_json(manifest, rewritten)
 
 
 def _publish_snakemake_metadata(
@@ -517,10 +559,15 @@ def _run(args: argparse.Namespace) -> int:
                 scratch_directory, run_directory, durable_invocation
             )
             if return_code == 0:
+                scratch_results = scratch_directory / "results"
+                durable_results = run_directory / "results"
                 _replace_tree(
-                    scratch_directory / "results",
-                    run_directory / "results",
+                    scratch_results,
+                    durable_results,
                     required=True,
+                    prepare=lambda stage: _rewrite_published_wgs_manifests(
+                        stage, scratch_results, durable_results
+                    ),
                 )
         except BaseException as error:
             status["error"] = f"publication failed: {error}"
