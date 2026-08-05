@@ -75,10 +75,6 @@ SHRINK_FIRE_BED = configured_path(config["shrink_fire_bed_tool"])
 MINIWDL = configured_executable(config["miniwdl_executable"])
 PIXI = configured_executable(config["pixi_executable"])
 
-FIRE_RAW_PILEUP = (
-    f"fibertools/FIRE/results/{{sample}}/"
-    f"{{sample}}-fire-{FIRE_VERSION}-pileup.bed.gz"
-)
 FIRE_PILEUP = (
     f"results/fire/pileups/"
     f"{{sample}}-fire-{FIRE_VERSION}-pileup.bed.gz"
@@ -89,7 +85,7 @@ FIRE_BIGWIG = (
 )
 FIRE_ELIGIBILITY = "intermediate/fire/eligibility.json"
 FIRE_ELIGIBILITY_REPORT = "results/fire/eligibility.tsv"
-FIRE_COMPLETE = "fibertools/FIRE/.longpipe-complete"
+FIRE_PILEUP_STAGE = "intermediate/fire/pileups"
 PBWGS_OUTPUTS = "pbWGS/{sample}/outputs.json"
 HAPLOTAGGED_BAM = (
     "results/wgs/{sample}/{sample}.GRCh38.haplotagged.bam"
@@ -250,6 +246,12 @@ def fire_eligibility_manifest(wildcards):
     return fire_eligibility_checkpoint(wildcards).output.manifest
 
 
+def completed_fire_pileup(wildcards):
+    checkpoint_output = checkpoints.fire.get()
+    filename = f"{wildcards.sample}-fire-{FIRE_VERSION}-pileup.bed.gz"
+    return os.path.join(str(checkpoint_output.output.pileups), filename)
+
+
 def fire_targets(wildcards):
     checkpoint_output = fire_eligibility_checkpoint(wildcards)
     samples = eligible_fire_samples(wildcards)
@@ -292,7 +294,7 @@ wildcard_constraints:
     sample="[A-Za-z0-9][A-Za-z0-9._-]*",
     peak_set="[A-Za-z0-9][A-Za-z0-9._-]*"
 
-localrules: all, wdl_input, hifi_wgs, fire_eligibility, fire_config, fire, register_fire_pileup
+localrules: all, wdl_input, hifi_wgs, fire_eligibility, fire_config, fire
 
 
 rule all:
@@ -530,13 +532,13 @@ rule fire_config:
             yaml.safe_dump(fire_config, config_handle, sort_keys=False)
 
 
-rule fire:
+checkpoint fire:
     input:
         table="fibertools/FIRE/config.tbl",
         config="fibertools/FIRE/config.yaml",
         pixi=FIRE_PIXI
     output:
-        touch(FIRE_COMPLETE)
+        pileups=directory(FIRE_PILEUP_STAGE)
     threads: 1
     resources:
         mem_mb=4000,
@@ -550,31 +552,28 @@ rule fire:
         "benchmarks/fire.tsv"
     shell:
         """
-        mkdir -p "$(dirname {log:q})"
+        mkdir -p "$(dirname {log:q})" {output.pileups:q}
         (
             cd fibertools/FIRE
             {params.executable:q} run \
                 --manifest-path {input.pixi:q} \
                 slurm --configfile config.yaml --keep-going
         ) > {log:q} 2>&1
+        (
+            IFS= read -r _
+            while IFS=$'\t' read -r sample _; do
+                source="fibertools/FIRE/results/$sample/$sample-fire-{FIRE_VERSION}-pileup.bed.gz"
+                target="{output.pileups}/$sample-fire-{FIRE_VERSION}-pileup.bed.gz"
+                test -s "$source"
+                ln "$source" "$target"
+            done
+        ) < fibertools/FIRE/config.tbl >> {log:q} 2>&1
         """
-
-
-rule register_fire_pileup:
-    input:
-        complete=FIRE_COMPLETE
-    output:
-        FIRE_RAW_PILEUP
-    resources:
-        mem_mb=1000,
-        runtime=5
-    shell:
-        "test -s {output:q}"
 
 
 rule publish_fire_pileup:
     input:
-        FIRE_RAW_PILEUP
+        completed_fire_pileup
     output:
         FIRE_PILEUP
     threads: 1
@@ -596,7 +595,7 @@ rule publish_fire_pileup:
 
 rule fire_bigwig:
     input:
-        pileup=FIRE_RAW_PILEUP,
+        pileup=completed_fire_pileup,
         chrom_sizes=CHROM_SIZES,
         shrink_tool=SHRINK_FIRE_BED
     output:
@@ -637,7 +636,7 @@ rule fire_bigwig:
 rule scatac_map:
     input:
         peaks=lambda wildcards: CCRE_PEAKS[wildcards.peak_set],
-        pileup=FIRE_RAW_PILEUP,
+        pileup=completed_fire_pileup,
         chrom_sizes=CHROM_SIZES
     output:
         temp("intermediate/fire/ccre/{peak_set}/{sample}.mapped.bed")
