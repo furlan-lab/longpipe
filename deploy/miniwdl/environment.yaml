@@ -1,0 +1,10 @@
+name: miniwdl
+channels:
+  - https://conda-forge.fredhutch.org/conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - miniwdl=1.15.0
+  - pip
+  - pip:
+      - miniwdl-slurm==0.4.0

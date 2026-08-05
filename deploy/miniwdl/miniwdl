@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+install_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ -n "${MINIWDL_CACHE_ROOT:-}" ]]; then
+    cache_root="${MINIWDL_CACHE_ROOT}"
+elif [[ -n "${LONGPIPE_SCRATCH_ROOT:-}" ]]; then
+    cache_root="${LONGPIPE_SCRATCH_ROOT%/}/.miniwdl"
+elif [[ -n "${LONGPIPE_SCRATCH_DIR:-}" ]]; then
+    cache_root="$(dirname "${LONGPIPE_SCRATCH_DIR%/}")/.miniwdl"
+else
+    cache_root="${TMPDIR:-/tmp}/miniwdl-${USER}"
+fi
+
+mkdir -p \
+    "${cache_root}/miniwdl_call_cache" \
+    "${cache_root}/miniwdl_singularity_cache"
+
+export MINIWDL_CFG="${install_root}/config/miniwdl.cfg"
+export MINIWDL__CALL_CACHE__DIR="${cache_root}/miniwdl_call_cache"
+export MINIWDL__SINGULARITY__IMAGE_CACHE="${cache_root}/miniwdl_singularity_cache"
+export PYTHONNOUSERSITE=1
+
+exec "${install_root}/env/bin/miniwdl" "$@"
