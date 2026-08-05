@@ -79,6 +79,7 @@ FIRE_PILEUP = (
     f"results/fire/pileups/"
     f"{{sample}}-fire-{FIRE_VERSION}-pileup.bed.gz"
 )
+FIRE_PILEUP_INDEX = FIRE_PILEUP + ".tbi"
 FIRE_BIGWIG = (
     f"results/fire/bigwigs/"
     f"{{sample}}-fire-{FIRE_VERSION}-pileup_shrunk.bw"
@@ -258,6 +259,7 @@ def fire_targets(wildcards):
     return (
         [checkpoint_output.output.report]
         + expand(FIRE_PILEUP, sample=samples)
+        + expand(FIRE_PILEUP_INDEX, sample=samples)
         + expand(FIRE_BIGWIG, sample=samples)
         + expand(
             "results/fire/ccre/{peak_set}/{sample}_scATAC_max_scores.bed",
@@ -572,7 +574,13 @@ checkpoint fire:
                 source="fibertools/FIRE/results/$sample/$sample-fire-{FIRE_VERSION}-pileup.bed.gz"
                 target="{output.pileups}/$sample-fire-{FIRE_VERSION}-pileup.bed.gz"
                 test -s "$source"
-                ln "$source" "$target"
+                test -s "$source.tbi"
+                if ! [[ "$source" -ef "$target" ]]; then
+                    ln -f "$source" "$target"
+                fi
+                if ! [[ "$source.tbi" -ef "$target.tbi" ]]; then
+                    ln -f "$source.tbi" "$target.tbi"
+                fi
             done
         ) < fibertools/FIRE/config.tbl >> {log:q} 2>&1
         """
@@ -580,9 +588,11 @@ checkpoint fire:
 
 rule publish_fire_pileup:
     input:
-        completed_fire_pileup
+        pileup=completed_fire_pileup,
+        index=lambda wildcards: completed_fire_pileup(wildcards) + ".tbi"
     output:
-        FIRE_PILEUP
+        pileup=FIRE_PILEUP,
+        index=FIRE_PILEUP_INDEX
     threads: 1
     resources:
         mem_mb=4000,
@@ -594,15 +604,20 @@ rule publish_fire_pileup:
         "benchmarks/publish_fire_pileup/{sample}.tsv"
     shell:
         """
-        mkdir -p "$(dirname {output:q})" "$(dirname {log:q})"
-        cp {input:q} {output:q} > {log:q} 2>&1
-        test -s {output:q}
+        mkdir -p "$(dirname {output.pileup:q})" "$(dirname {log:q})"
+        (
+            cp {input.pileup:q} {output.pileup:q}
+            cp {input.index:q} {output.index:q}
+        ) > {log:q} 2>&1
+        test -s {output.pileup:q}
+        test -s {output.index:q}
         """
 
 
 rule fire_bigwig:
     input:
         pileup=completed_fire_pileup,
+        index=lambda wildcards: completed_fire_pileup(wildcards) + ".tbi",
         chrom_sizes=CHROM_SIZES,
         shrink_tool=SHRINK_FIRE_BED
     output:
@@ -644,6 +659,7 @@ rule scatac_map:
     input:
         peaks=lambda wildcards: CCRE_PEAKS[wildcards.peak_set],
         pileup=completed_fire_pileup,
+        pileup_index=lambda wildcards: completed_fire_pileup(wildcards) + ".tbi",
         chrom_sizes=CHROM_SIZES
     output:
         temp("intermediate/fire/ccre/{peak_set}/{sample}.mapped.bed")
@@ -663,9 +679,16 @@ rule scatac_map:
         """
         mkdir -p "$(dirname {output:q})" "$(dirname {log:q})"
         if [[ {params.sorted} -eq 1 ]]; then
+            pileup_contigs="$(tabix --list-chroms {input.pileup:q})"
             bedtools map \
                 -a {input.peaks:q} \
-                -b {input.pileup:q} \
+                -b <(
+                    while read -r chrom _; do
+                        if grep -Fqx "$chrom" <<< "$pileup_contigs"; then
+                            tabix {input.pileup:q} "$chrom"
+                        fi
+                    done < {input.chrom_sizes:q}
+                ) \
                 -c 6,6,6 \
                 -o max,median,sum \
                 -sorted \

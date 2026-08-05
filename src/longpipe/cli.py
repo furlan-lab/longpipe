@@ -570,6 +570,10 @@ def _build_sample_results(
             scratch_fire / "pileups" / pileup_name,
             stage / sample / "fire" / "pileups" / pileup_name,
         )
+        _copy_required_output(
+            scratch_fire / "pileups" / f"{pileup_name}.tbi",
+            stage / sample / "fire" / "pileups" / f"{pileup_name}.tbi",
+        )
         bigwig_name = f"{sample}-fire-{fire_version}-pileup_shrunk.bw"
         _copy_required_output(
             scratch_fire / "bigwigs" / bigwig_name,

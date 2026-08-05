@@ -97,6 +97,8 @@ class WorkflowDagTest(unittest.TestCase):
                 "  mkdir -p \"results/$sample\"\n"
                 "  printf 'pileup\\n' > \"results/$sample/"
                 "$sample-fire-v0.1.1-pileup.bed.gz\"\n"
+                "  printf 'index\\n' > \"results/$sample/"
+                "$sample-fire-v0.1.1-pileup.bed.gz.tbi\"\n"
                 "done\n"
                 ") < config.tbl\n",
                 encoding="utf-8",
@@ -142,6 +144,27 @@ class WorkflowDagTest(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stdout)
 
+            resumed = subprocess.run(
+                [
+                    "snakemake",
+                    target,
+                    "--snakefile",
+                    str(REPOSITORY_ROOT / "Snakefile"),
+                    "--configfile",
+                    str(config_path),
+                    "--cores",
+                    "1",
+                    "--forcerun",
+                    "fire",
+                ],
+                cwd=run_directory,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            self.assertEqual(resumed.returncode, 0, resumed.stdout)
+
             raw_pileup = (
                 scratch_directory
                 / "fibertools"
@@ -166,6 +189,10 @@ class WorkflowDagTest(unittest.TestCase):
                 raw_pileup.stat().st_ino,
                 staged_pileup.stat().st_ino,
             )
+            raw_index = raw_pileup.with_name(raw_pileup.name + ".tbi")
+            staged_index = staged_pileup.with_name(staged_pileup.name + ".tbi")
+            self.assertEqual(raw_index.read_text(), "index\n")
+            self.assertEqual(raw_index.stat().st_ino, staged_index.stat().st_ino)
 
     def _fixture(
         self,

@@ -212,9 +212,10 @@ After a successful workflow, Longpipe stages and publishes:
 ```
 
 The `fire/` directory is present only for samples that enter the Fiber-seq
-branch and pass the configured mean-depth threshold. Scratch paths retain the
-workflow's internal `results/{wgs,fire,sv,hla}` layout so existing work can
-resume; Longpipe performs the per-sample transformation only when publishing a
+branch and pass the configured mean-depth threshold. Published FIRE pileups
+include their Tabix `.tbi` indexes. Scratch paths retain the workflow's
+internal `results/{wgs,fire,sv,hla}` layout so existing work can resume;
+Longpipe performs the per-sample transformation only when publishing a
 successful run. A successful publication removes the superseded durable
 `results/` tree from older Longpipe versions.
 
@@ -243,9 +244,9 @@ copy operations, requests a GPU only for nucleosome annotation, and emits a
 SLURM efficiency report. Up to ten sample-level MiniWDL workflows run at a
 time; each `hifi_wgs` job consumes one `wdl_driver` resource unit.
 
-The cCRE rule performs one `bedtools map` pass for max, median, and sum. Keep
-`scatac_sorted: true` only when both the cCRE BED and FIRE pileups use the
-chromosome order in `chrom_sizes`.
+The cCRE rule performs one `bedtools map` pass for max, median, and sum. With
+`scatac_sorted: true`, the cCRE BED must use the chromosome order in
+`chrom_sizes`; Longpipe streams indexed FIRE pileups in that order.
 
 ## Development
 

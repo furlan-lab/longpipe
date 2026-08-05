@@ -97,6 +97,9 @@ for sample in fire_samples:
     (pileups / f"{sample}-fire-v0.1.1-pileup.bed.gz").write_text(
         f"invocation {count}\\n"
     )
+    (pileups / f"{sample}-fire-v0.1.1-pileup.bed.gz.tbi").write_text(
+        "index\\n"
+    )
     bigwigs = fire / "bigwigs"
     bigwigs.mkdir(parents=True, exist_ok=True)
     (bigwigs / f"{sample}-fire-v0.1.1-pileup_shrunk.bw").write_text(
