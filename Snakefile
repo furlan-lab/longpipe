@@ -49,6 +49,7 @@ HIA5_GATES = config["hia5_gates_fiberseq"]
 HLA_MODE = config["hla_mode"]
 SCATAC_SORTED = config["scatac_sorted"]
 FIRE_VERSION = config["fire_version"]
+FIRE_MIN_MEAN_DEPTH = float(config.get("fire_min_mean_depth", 8.0))
 
 FASTA = configured_path(config["ref_fasta"])
 FIRE_REF = configured_path(config["fire_ref"])
@@ -86,6 +87,10 @@ FIRE_BIGWIG = (
     f"results/fire/bigwigs/"
     f"{{sample}}-fire-{FIRE_VERSION}-pileup_shrunk.bw"
 )
+FIRE_ELIGIBILITY = "intermediate/fire/eligibility.json"
+FIRE_ELIGIBILITY_REPORT = "results/fire/eligibility.tsv"
+FIRE_COMPLETE = "fibertools/FIRE/.longpipe-complete"
+PBWGS_OUTPUTS = "pbWGS/{sample}/outputs.json"
 HAPLOTAGGED_BAM = (
     "results/wgs/{sample}/{sample}.GRCh38.haplotagged.bam"
 )
@@ -224,27 +229,52 @@ if len(svtopo_prefixes) != len(set(svtopo_prefixes)):
         "sample labels collide after replacing underscores for SVTopo prefixes"
     )
 
-FIRE_SAMPLES = [sample for sample in SAMPLES if uses_fiberseq(sample)]
+FIRE_CANDIDATES = [sample for sample in SAMPLES if uses_fiberseq(sample)]
 
-FIRE_TARGETS = (
-    expand(FIRE_PILEUP, sample=FIRE_SAMPLES)
-    + expand(FIRE_BIGWIG, sample=FIRE_SAMPLES)
-    + expand(
-        "results/fire/ccre/{peak_set}/{sample}_scATAC_max_scores.bed",
-        sample=FIRE_SAMPLES,
-        peak_set=CCRE_PEAK_SETS,
+
+def fire_eligibility_checkpoint(wildcards):
+    return checkpoints.fire_eligibility.get()
+
+
+def eligible_fire_samples(wildcards):
+    checkpoint_output = fire_eligibility_checkpoint(wildcards)
+    with open(checkpoint_output.output.manifest, encoding="utf-8") as handle:
+        return json.load(handle)["eligible_samples"]
+
+
+def eligible_fire_bams(wildcards):
+    return expand(HAPLOTAGGED_BAM, sample=eligible_fire_samples(wildcards))
+
+
+def fire_eligibility_manifest(wildcards):
+    return fire_eligibility_checkpoint(wildcards).output.manifest
+
+
+def fire_targets(wildcards):
+    checkpoint_output = fire_eligibility_checkpoint(wildcards)
+    samples = eligible_fire_samples(wildcards)
+    return (
+        [checkpoint_output.output.report]
+        + expand(FIRE_PILEUP, sample=samples)
+        + expand(FIRE_BIGWIG, sample=samples)
+        + expand(
+            "results/fire/ccre/{peak_set}/{sample}_scATAC_max_scores.bed",
+            sample=samples,
+            peak_set=CCRE_PEAK_SETS,
+        )
+        + expand(
+            "results/fire/ccre/{peak_set}/{sample}_scATAC_median_scores.bed",
+            sample=samples,
+            peak_set=CCRE_PEAK_SETS,
+        )
+        + expand(
+            "results/fire/ccre/{peak_set}/{sample}_scATAC_sum_scores.bed",
+            sample=samples,
+            peak_set=CCRE_PEAK_SETS,
+        )
     )
-    + expand(
-        "results/fire/ccre/{peak_set}/{sample}_scATAC_median_scores.bed",
-        sample=FIRE_SAMPLES,
-        peak_set=CCRE_PEAK_SETS,
-    )
-    + expand(
-        "results/fire/ccre/{peak_set}/{sample}_scATAC_sum_scores.bed",
-        sample=FIRE_SAMPLES,
-        peak_set=CCRE_PEAK_SETS,
-    )
-)
+
+
 SV_TARGETS = (
     expand("results/sv/{sample}.sawfish.vcf.gz", sample=SAMPLES)
     + expand("results/sv/{sample}.sawfish.vcf.gz.tbi", sample=SAMPLES)
@@ -262,12 +292,14 @@ wildcard_constraints:
     sample="[A-Za-z0-9][A-Za-z0-9._-]*",
     peak_set="[A-Za-z0-9][A-Za-z0-9._-]*"
 
-localrules: all, wdl_input, hifi_wgs, fire_config, fire
+localrules: all, wdl_input, hifi_wgs, fire_eligibility, fire_config, fire, register_fire_pileup
 
 
 rule all:
     input:
-        FIRE_TARGETS + SV_TARGETS + HLA_TARGETS
+        fire=fire_targets,
+        sv=SV_TARGETS,
+        hla=HLA_TARGETS
 
 
 rule add_nucleosomes:
@@ -326,7 +358,7 @@ rule hifi_wgs:
         config="pbWGS/{sample}/input.json",
         wdl=WDL
     output:
-        "pbWGS/{sample}/outputs.json"
+        PBWGS_OUTPUTS
     threads: 1
     resources:
         mem_mb=4000,
@@ -349,6 +381,70 @@ rule hifi_wgs:
             --verbose > {log:q} 2>&1
         test -s {output:q}
         """
+
+
+checkpoint fire_eligibility:
+    input:
+        manifests=expand(PBWGS_OUTPUTS, sample=FIRE_CANDIDATES)
+    output:
+        manifest=FIRE_ELIGIBILITY,
+        report=FIRE_ELIGIBILITY_REPORT
+    params:
+        minimum_mean_depth=FIRE_MIN_MEAN_DEPTH
+    run:
+        Path(output.manifest).parent.mkdir(parents=True, exist_ok=True)
+        Path(output.report).parent.mkdir(parents=True, exist_ok=True)
+        decisions = []
+        eligible_samples = []
+        for sample, manifest_path in zip(FIRE_CANDIDATES, input.manifests):
+            with open(manifest_path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            outputs = payload.get("outputs", payload)
+            try:
+                mean_depth = float(
+                    outputs["humanwgs_singleton.stat_mean_depth"]
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError(
+                    f"{sample}: {manifest_path} does not contain a valid "
+                    "humanwgs_singleton.stat_mean_depth"
+                ) from error
+
+            if mean_depth < params.minimum_mean_depth:
+                eligible = False
+                reason = "below_minimum_mean_depth"
+            else:
+                eligible = True
+                reason = "eligible"
+                eligible_samples.append(sample)
+            decisions.append(
+                {
+                    "sample": sample,
+                    "mean_depth": mean_depth,
+                    "eligible": eligible,
+                    "reason": reason,
+                }
+            )
+
+        eligibility = {
+            "minimum_mean_depth": params.minimum_mean_depth,
+            "eligible_samples": eligible_samples,
+            "samples": decisions,
+        }
+        with open(output.manifest, "w", encoding="utf-8") as handle:
+            json.dump(eligibility, handle, indent=2)
+            handle.write("\n")
+        with open(output.report, "w", encoding="utf-8") as handle:
+            handle.write(
+                "sample\tmean_depth\tminimum_mean_depth\teligible\treason\n"
+            )
+            for decision in decisions:
+                handle.write(
+                    f"{decision['sample']}\t{decision['mean_depth']:g}\t"
+                    f"{params.minimum_mean_depth:g}\t"
+                    f"{'yes' if decision['eligible'] else 'no'}\t"
+                    f"{decision['reason']}\n"
+                )
 
 
 rule copy_pbwdl:
@@ -405,7 +501,8 @@ rule haplotagged_bam_index:
 
 rule fire_config:
     input:
-        bams=expand(HAPLOTAGGED_BAM, sample=FIRE_SAMPLES),
+        eligibility=fire_eligibility_manifest,
+        bams=eligible_fire_bams,
         reference=FIRE_REF,
         pixi=FIRE_PIXI
     output:
@@ -413,9 +510,13 @@ rule fire_config:
         config="fibertools/FIRE/config.yaml"
     run:
         Path(output.table).parent.mkdir(parents=True, exist_ok=True)
+        with open(input.eligibility, encoding="utf-8") as eligibility_handle:
+            fire_samples = json.load(eligibility_handle)["eligible_samples"]
+        if len(fire_samples) != len(input.bams):
+            raise ValueError("FIRE eligibility and BAM inputs are inconsistent")
         with open(output.table, "w", encoding="utf-8") as table_handle:
             table_handle.write("sample\tbam\n")
-            for sample, bam_path in zip(FIRE_SAMPLES, input.bams):
+            for sample, bam_path in zip(fire_samples, input.bams):
                 table_handle.write(
                     f"{sample}\t{Path(str(bam_path)).resolve()}\n"
                 )
@@ -435,7 +536,7 @@ rule fire:
         config="fibertools/FIRE/config.yaml",
         pixi=FIRE_PIXI
     output:
-        expand(FIRE_RAW_PILEUP, sample=FIRE_SAMPLES)
+        touch(FIRE_COMPLETE)
     threads: 1
     resources:
         mem_mb=4000,
@@ -457,6 +558,18 @@ rule fire:
                 slurm --configfile config.yaml --keep-going
         ) > {log:q} 2>&1
         """
+
+
+rule register_fire_pileup:
+    input:
+        complete=FIRE_COMPLETE
+    output:
+        FIRE_RAW_PILEUP
+    resources:
+        mem_mb=1000,
+        runtime=5
+    shell:
+        "test -s {output:q}"
 
 
 rule publish_fire_pileup:

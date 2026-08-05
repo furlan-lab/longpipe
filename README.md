@@ -124,6 +124,12 @@ Each peak set is mapped against every Fiber-seq sample. Names may contain
 letters, digits, `.`, `_`, and `-`, and are used as output directory names
 below `results/fire/ccre/`.
 
+FIRE runs only for Fiber-seq samples whose PacBio WDL `outputs.json` reports
+`humanwgs_singleton.stat_mean_depth` at or above `fire_min_mean_depth`
+(default `8.0`). This is a mean-depth prefilter; FIRE's own coverage checks
+still apply. Decisions and skipped samples are recorded in
+`results/fire/eligibility.tsv`.
+
 The runsheet requires:
 
 | Column | Meaning |

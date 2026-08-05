@@ -6,6 +6,7 @@ hia5_gates_fiberseq: true
 hla_mode: contigs
 scatac_sorted: true
 fire_version: v0.1.1
+fire_min_mean_depth: 8.0
 wdl_preemptible: true
 
 # References

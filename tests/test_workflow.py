@@ -14,6 +14,15 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSchemaTest(unittest.TestCase):
+    def test_fire_minimum_mean_depth_defaults_to_eight(self):
+        schema = yaml.safe_load(
+            (REPOSITORY_ROOT / "schemas" / "config.schema.yaml").read_text()
+        )
+
+        self.assertEqual(
+            schema["properties"]["fire_min_mean_depth"]["default"], 8.0
+        )
+
     def test_slurm_profile_allows_ten_wdl_drivers(self):
         profile = yaml.safe_load(
             (REPOSITORY_ROOT / "profiles" / "slurm" / "config.yaml").read_text()
@@ -160,10 +169,8 @@ class WorkflowDagTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stdout)
         self.assertTrue((scratch_directory / ".snakemake").is_dir())
         self.assertFalse((run_directory / ".snakemake").exists())
+        self.assertIn("checkpoint fire_eligibility", completed.stdout)
         if hia5 == "yes":
-            for peak_set in ("encode", "brain"):
-                expected = (
-                    f"results/fire/ccre/{peak_set}/"
-                    "sample_scATAC_max_scores.bed"
-                )
-                self.assertIn(expected, completed.stdout)
+            self.assertIn("rule add_nucleosomes", completed.stdout)
+        else:
+            self.assertNotIn("rule add_nucleosomes", completed.stdout)
