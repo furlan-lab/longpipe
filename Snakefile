@@ -555,9 +555,16 @@ checkpoint fire:
         mkdir -p "$(dirname {log:q})" {output.pileups:q}
         (
             cd fibertools/FIRE
+            targets=()
+            while IFS=$'\t' read -r sample _; do
+                targets+=(
+                    "results/$sample/$sample-fire-{FIRE_VERSION}-pileup.bed.gz"
+                )
+            done < <(tail -n +2 config.tbl)
             {params.executable:q} run \
                 --manifest-path {input.pixi:q} \
-                slurm --configfile config.yaml --keep-going
+                slurm --configfile config.yaml --keep-going \
+                "${{targets[@]}}"
         ) > {log:q} 2>&1
         (
             IFS= read -r _
