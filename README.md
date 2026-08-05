@@ -122,13 +122,13 @@ ccre_peaks:
 
 Each peak set is mapped against every Fiber-seq sample. Names may contain
 letters, digits, `.`, `_`, and `-`, and are used as output directory names
-below `results/fire/ccre/`.
+below `samples/<sample>/fire/ccre/`.
 
 FIRE runs only for Fiber-seq samples whose PacBio WDL `outputs.json` reports
 `humanwgs_singleton.stat_mean_depth` at or above `fire_min_mean_depth`
 (default `8.0`). This is a mean-depth prefilter; FIRE's own coverage checks
 still apply. Decisions and skipped samples are recorded in
-`results/fire/eligibility.tsv`.
+`run-metadata/fire-eligibility.tsv`.
 
 The runsheet requires:
 
@@ -191,20 +191,32 @@ After a successful workflow, Longpipe stages and publishes:
 260410_BT-brain/
 ├── config.yaml
 ├── runsheet.csv
-├── results/
-│   ├── fire/
-│   │   ├── pileups/
-│   │   ├── bigwigs/
-│   │   └── ccre/
-│   │       ├── encode/
-│   │       └── brain/
-│   ├── hla/
-│   ├── sv/
-│   └── wgs/
+├── samples/
+│   ├── Brain_1/
+│   │   ├── pbWGS/
+│   │   ├── fire/
+│   │   │   ├── pileups/
+│   │   │   ├── bigwigs/
+│   │   │   └── ccre/
+│   │   │       ├── encode/
+│   │   │       └── brain/
+│   │   ├── sawfish/
+│   │   ├── svtopo/
+│   │   └── hla/
+│   └── Brain_2/
+│       └── ...
 ├── logs/
 ├── benchmarks/
 └── run-metadata/
+    └── fire-eligibility.tsv
 ```
+
+The `fire/` directory is present only for samples that enter the Fiber-seq
+branch and pass the configured mean-depth threshold. Scratch paths retain the
+workflow's internal `results/{wgs,fire,sv,hla}` layout so existing work can
+resume; Longpipe performs the per-sample transformation only when publishing a
+successful run. A successful publication removes the superseded durable
+`results/` tree from older Longpipe versions.
 
 `run-metadata/` contains the latest status and versioned invocation records
 with the exact configuration, runsheet, and selected Snakemake metadata used

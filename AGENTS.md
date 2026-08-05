@@ -100,27 +100,33 @@ layout:
 RUNNAME/
 ├── config.yaml
 ├── runsheet.csv
-├── results/
-│   ├── fire/
-│   ├── sv/
-│   └── hla/
+├── samples/
+│   └── <sample>/
+│       ├── pbWGS/
+│       ├── fire/
+│       ├── sawfish/
+│       ├── svtopo/
+│       └── hla/
 ├── logs/
 ├── benchmarks/
 └── run metadata/status
 ```
 
-FIRE's user-facing outputs must be published below `results/fire/`, rather
-than retaining the workflow's current top-level `fibertools/FIRE` paths.
-Publish the final FIRE pileups, bigWigs, and cCRE summaries.
+FIRE's user-facing outputs must be published below
+`samples/<sample>/fire/`, rather than retaining the workflow's current
+top-level `fibertools/FIRE` paths. Publish the final FIRE pileups, bigWigs,
+and cCRE summaries. Publish the run-level FIRE eligibility report below
+`run-metadata/`.
 
 `ccre_peaks` is a non-empty YAML mapping of filesystem-safe peak-set names to
 BED paths. Run cCRE aggregation for every Fiber-seq sample and every configured
-peak set, publishing each set below `results/fire/ccre/<peak-set>/`.
+peak set, publishing each set below
+`samples/<sample>/fire/ccre/<peak-set>/`.
 
-Publish final Sawfish/SVTopo and HiFiHLA outputs below `results/sv/` and
-`results/hla/`, respectively. Also publish logs, benchmarks, Snakemake
-metadata needed for diagnosis, the configuration snapshot, and a clear run
-status record.
+Publish final PacBio WDL, Sawfish, SVTopo, and HiFiHLA outputs below each
+sample's `pbWGS/`, `sawfish/`, `svtopo/`, and `hla/` directories,
+respectively. Also publish logs, benchmarks, Snakemake metadata needed for
+diagnosis, the configuration snapshot, and a clear run status record.
 
 Large intermediates remain only in scratch. These include MiniWDL run
 directories, assemblies, temporary FASTQs, Sawfish working directories,

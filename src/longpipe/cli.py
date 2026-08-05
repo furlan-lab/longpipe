@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import fcntl
 import json
 import os
@@ -316,16 +317,23 @@ def _replace_tree(
     if required and not source.is_dir():
         raise LongpipeError(f"expected workflow output directory is missing: {source}")
 
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    stage = destination.parent / f".{destination.name}.stage-{uuid.uuid4().hex}"
-    backup = destination.parent / f".{destination.name}.backup-{uuid.uuid4().hex}"
-    try:
+    def build(stage: Path) -> None:
         if source.is_dir():
             shutil.copytree(source, stage)
         else:
             stage.mkdir()
         if prepare is not None:
             prepare(stage)
+
+    _replace_built_tree(destination, build)
+
+
+def _replace_built_tree(destination: Path, build: Callable[[Path], None]) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    stage = destination.parent / f".{destination.name}.stage-{uuid.uuid4().hex}"
+    backup = destination.parent / f".{destination.name}.backup-{uuid.uuid4().hex}"
+    try:
+        build(stage)
 
         had_destination = destination.exists() or destination.is_symlink()
         if had_destination:
@@ -354,11 +362,108 @@ def _replace_tree(
                 os.replace(backup, destination)
 
 
-def _rewrite_published_wgs_manifests(
-    staged_results: Path, scratch_results: Path, durable_results: Path
+def _atomic_copy(source: Path, destination: Path, required: bool = False) -> None:
+    if required and not source.is_file():
+        raise LongpipeError(f"expected workflow output file is missing: {source}")
+    if not source.is_file():
+        return
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(
+        f".{destination.name}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        shutil.copy2(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _sample_labels(runsheet: Path) -> list[str]:
+    try:
+        with runsheet.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+    except OSError as error:
+        raise LongpipeError(f"could not read runsheet {runsheet}: {error}") from error
+
+    labels: list[str] = []
+    for row in rows:
+        label = (
+            row.get("lab_name", "").strip()
+            or row.get("core_name", "").strip()
+        )
+        if not RUN_NAME_PATTERN.fullmatch(label):
+            raise LongpipeError(f"invalid sample label in {runsheet}: {label!r}")
+        labels.append(label)
+    if not labels:
+        raise LongpipeError(f"runsheet contains no samples: {runsheet}")
+    duplicates = sorted({label for label in labels if labels.count(label) > 1})
+    if duplicates:
+        raise LongpipeError(
+            f"duplicate sample labels in {runsheet}: {', '.join(duplicates)}"
+        )
+    return labels
+
+
+def _read_fire_eligibility(report: Path, samples: set[str]) -> set[str]:
+    if not report.is_file():
+        raise LongpipeError(f"expected workflow output file is missing: {report}")
+    try:
+        with report.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle, delimiter="\t"))
+    except OSError as error:
+        raise LongpipeError(
+            f"could not read FIRE eligibility report {report}: {error}"
+        ) from error
+
+    eligible: set[str] = set()
+    for row in rows:
+        sample = row.get("sample", "").strip()
+        decision = row.get("eligible", "").strip().lower()
+        if sample not in samples:
+            raise LongpipeError(
+                f"FIRE eligibility report contains unknown sample {sample!r}: {report}"
+            )
+        if decision not in {"yes", "no"}:
+            raise LongpipeError(
+                f"FIRE eligibility report has invalid decision for {sample!r}: "
+                f"{decision!r}"
+            )
+        if decision == "yes":
+            eligible.add(sample)
+    return eligible
+
+
+def _sample_from_filename(
+    filename: str, known_samples: set[str], delimiter: str
+) -> str | None:
+    matches = [
+        sample
+        for sample in known_samples
+        if filename.startswith(f"{sample}{delimiter}")
+    ]
+    return max(matches, key=len) if matches else None
+
+
+def _copy_output(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_dir():
+        shutil.copytree(source, destination)
+    else:
+        shutil.copy2(source, destination)
+
+
+def _copy_required_output(source: Path, destination: Path) -> None:
+    if not source.exists():
+        raise LongpipeError(f"expected workflow output is missing: {source}")
+    _copy_output(source, destination)
+
+
+def _rewrite_published_wgs_manifest(
+    manifest: Path, scratch_sample: Path, durable_sample: Path
 ) -> None:
-    scratch_root = str(scratch_results)
-    durable_root = str(durable_results)
+    scratch_root = str(scratch_sample)
+    durable_root = str(durable_sample)
     scratch_prefix = scratch_root + os.sep
 
     def rewrite(value: object) -> object:
@@ -373,20 +478,202 @@ def _rewrite_published_wgs_manifests(
                 return durable_root + os.sep + value[len(scratch_prefix) :]
         return value
 
-    for manifest in sorted((staged_results / "wgs").glob("*/outputs.json")):
-        try:
-            payload = json.loads(manifest.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise LongpipeError(
+            f"could not read WGS output manifest {manifest}: {error}"
+        ) from error
+    if not isinstance(payload, dict):
+        raise LongpipeError(f"WGS output manifest is not a JSON object: {manifest}")
+    rewritten = rewrite(payload)
+    assert isinstance(rewritten, dict)
+    _atomic_write_json(manifest, rewritten)
+
+
+def _build_sample_results(
+    stage: Path,
+    scratch_results: Path,
+    durable_samples: Path,
+    sample_names: list[str],
+    peak_sets: set[str],
+    fire_version: str,
+) -> None:
+    expected_result_directories = {"fire", "hla", "sv", "wgs"}
+    unexpected_result_entries = sorted(
+        entry
+        for entry in scratch_results.iterdir()
+        if entry.name not in expected_result_directories
+    )
+    if unexpected_result_entries:
+        raise LongpipeError(
+            f"unexpected workflow result: {unexpected_result_entries[0]}"
+        )
+
+    scratch_wgs = scratch_results / "wgs"
+    if not scratch_wgs.is_dir():
+        raise LongpipeError(
+            f"expected workflow output directory is missing: {scratch_wgs}"
+        )
+
+    scratch_sample_directories = {
+        entry.name for entry in scratch_wgs.iterdir() if entry.is_dir()
+    }
+    unexpected_wgs_entries = [
+        entry for entry in scratch_wgs.iterdir() if not entry.is_dir()
+    ]
+    if unexpected_wgs_entries:
+        raise LongpipeError(
+            f"unexpected entry in WGS result directory: {unexpected_wgs_entries[0]}"
+        )
+
+    current_samples = set(sample_names)
+    missing_samples = sorted(current_samples - scratch_sample_directories)
+    if missing_samples:
+        raise LongpipeError(
+            "missing WGS results for samples: " + ", ".join(missing_samples)
+        )
+
+    eligibility_report = scratch_results / "fire" / "eligibility.tsv"
+    eligible_fire_samples = _read_fire_eligibility(
+        eligibility_report, current_samples
+    )
+    stage.mkdir()
+
+    for sample in sample_names:
+        source = scratch_wgs / sample
+        destination = stage / sample / "pbWGS"
+        shutil.copytree(source, destination)
+        manifest = destination / "outputs.json"
+        if not manifest.is_file():
+            raise LongpipeError(f"WGS output manifest is missing: {source}")
+        _rewrite_published_wgs_manifest(
+            manifest,
+            source,
+            durable_samples / sample / "pbWGS",
+        )
+
+    scratch_fire = scratch_results / "fire"
+    expected_fire_entries = {"bigwigs", "ccre", "eligibility.tsv", "pileups"}
+    unexpected_fire_entries = sorted(
+        entry
+        for entry in scratch_fire.iterdir()
+        if entry.name not in expected_fire_entries
+    )
+    if unexpected_fire_entries:
+        raise LongpipeError(
+            f"unexpected FIRE result: {unexpected_fire_entries[0]}"
+        )
+    for sample in eligible_fire_samples:
+        pileup_name = f"{sample}-fire-{fire_version}-pileup.bed.gz"
+        _copy_required_output(
+            scratch_fire / "pileups" / pileup_name,
+            stage / sample / "fire" / "pileups" / pileup_name,
+        )
+        bigwig_name = f"{sample}-fire-{fire_version}-pileup_shrunk.bw"
+        _copy_required_output(
+            scratch_fire / "bigwigs" / bigwig_name,
+            stage / sample / "fire" / "bigwigs" / bigwig_name,
+        )
+        for peak_set in peak_sets:
+            for statistic in ("max", "median", "sum"):
+                ccre_name = f"{sample}_scATAC_{statistic}_scores.bed"
+                _copy_required_output(
+                    scratch_fire / "ccre" / peak_set / ccre_name,
+                    stage / sample / "fire" / "ccre" / peak_set / ccre_name,
+                )
+
+    scratch_sv = scratch_results / "sv"
+    if not scratch_sv.is_dir():
+        raise LongpipeError(
+            f"expected workflow output directory is missing: {scratch_sv}"
+        )
+    for source in sorted(scratch_sv.iterdir()):
+        sample = _sample_from_filename(
+            source.name, scratch_sample_directories, "."
+        )
+        if sample is None:
+            raise LongpipeError(f"could not assign SV output to a sample: {source}")
+        if sample not in current_samples:
+            continue
+        if source.name == f"{sample}.svtopo" and source.is_dir():
+            destination = stage / sample / "svtopo"
+        else:
+            destination = stage / sample / "sawfish" / source.name
+        _copy_output(source, destination)
+
+    scratch_hla = scratch_results / "hla"
+    if not scratch_hla.is_dir():
+        raise LongpipeError(
+            f"expected workflow output directory is missing: {scratch_hla}"
+        )
+    for source in sorted(scratch_hla.iterdir()):
+        sample = _sample_from_filename(
+            source.name, scratch_sample_directories, "_"
+        )
+        if sample is None:
+            raise LongpipeError(f"could not assign HLA output to a sample: {source}")
+        if sample in current_samples:
+            _copy_output(source, stage / sample / "hla" / source.name)
+
+    for sample in sample_names:
+        expected = (
+            stage / sample / "sawfish" / f"{sample}.sawfish.vcf.gz",
+            stage / sample / "sawfish" / f"{sample}.sawfish.vcf.gz.tbi",
+            stage / sample / "sawfish" / f"{sample}.supporting_reads.json.gz",
+            stage / sample / "svtopo",
+            stage / sample / "hla" / f"{sample}_hifihla_report.json",
+            stage / sample / "hla" / f"{sample}_hifihla_report.tsv",
+            stage / sample / "hla" / f"{sample}_hifihla_summary.tsv",
+        )
+        missing = [str(path) for path in expected if not path.exists()]
+        if missing:
             raise LongpipeError(
-                f"could not read WGS output manifest {manifest}: {error}"
-            ) from error
-        if not isinstance(payload, dict):
-            raise LongpipeError(
-                f"WGS output manifest is not a JSON object: {manifest}"
+                f"missing published outputs for {sample}: {', '.join(missing)}"
             )
-        rewritten = rewrite(payload)
-        assert isinstance(rewritten, dict)
-        _atomic_write_json(manifest, rewritten)
+
+
+def _publish_sample_results(
+    scratch_results: Path,
+    run_directory: Path,
+    runsheet_snapshot: Path,
+    config: dict,
+) -> None:
+    if not scratch_results.is_dir():
+        raise LongpipeError(
+            f"expected workflow output directory is missing: {scratch_results}"
+        )
+    sample_names = _sample_labels(runsheet_snapshot)
+    ccre_peaks = config.get("ccre_peaks", {})
+    if not isinstance(ccre_peaks, dict):
+        raise LongpipeError("ccre_peaks must be a mapping")
+    fire_version = config.get("fire_version")
+    if not isinstance(fire_version, str) or not fire_version:
+        raise LongpipeError("fire_version must be a non-empty string")
+    durable_samples = run_directory / "samples"
+
+    _replace_built_tree(
+        durable_samples,
+        lambda stage: _build_sample_results(
+            stage,
+            scratch_results,
+            durable_samples,
+            sample_names,
+            set(ccre_peaks),
+            fire_version,
+        ),
+    )
+    _atomic_copy(
+        scratch_results / "fire" / "eligibility.tsv",
+        run_directory / "run-metadata" / "fire-eligibility.tsv",
+        required=True,
+    )
+
+    legacy_results = run_directory / "results"
+    if legacy_results.is_symlink() or legacy_results.is_file():
+        legacy_results.unlink()
+    elif legacy_results.is_dir():
+        shutil.rmtree(legacy_results)
 
 
 def _publish_snakemake_metadata(
@@ -510,6 +797,7 @@ def _run(args: argparse.Namespace) -> int:
         config_snapshot, runsheet_snapshot, durable_invocation = _snapshot_inputs(
             run_directory, scratch_directory, invocation_id
         )
+        config, _ = _load_run_config(config_snapshot, config_snapshot.parent)
         command = _snakemake_command(
             args.snakemake_executable, workflow_root, config_snapshot
         )
@@ -560,14 +848,11 @@ def _run(args: argparse.Namespace) -> int:
             )
             if return_code == 0:
                 scratch_results = scratch_directory / "results"
-                durable_results = run_directory / "results"
-                _replace_tree(
+                _publish_sample_results(
                     scratch_results,
-                    durable_results,
-                    required=True,
-                    prepare=lambda stage: _rewrite_published_wgs_manifests(
-                        stage, scratch_results, durable_results
-                    ),
+                    run_directory,
+                    runsheet_snapshot,
+                    config,
                 )
         except BaseException as error:
             status["error"] = f"publication failed: {error}"
@@ -580,7 +865,7 @@ def _run(args: argparse.Namespace) -> int:
         status["finished_at"] = _now()
         _record_status(status, scratch_directory, run_directory, durable_invocation)
         if return_code == 0:
-            print(f"Run completed; results published to {run_directory / 'results'}")
+            print(f"Run completed; results published to {run_directory / 'samples'}")
         else:
             print(
                 f"Run failed with exit code {return_code}; diagnostics published to "

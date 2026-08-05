@@ -55,6 +55,7 @@ class LongpipeCliTest(unittest.TestCase):
         self.fake_snakemake = self.root / "fake-snakemake"
         self.fake_snakemake.write_text(
             """#!/usr/bin/env python3
+import csv
 import json
 import os
 import sys
@@ -73,15 +74,68 @@ count = int(counter_path.read_text()) + 1 if counter_path.exists() else 1
 counter_path.write_text(str(count))
 
 results = scratch / "results"
-(results / "fire").mkdir(parents=True, exist_ok=True)
-(results / "fire" / "result.txt").write_text(f"invocation {count}\\n")
-wgs = results / "wgs" / "sample"
-wgs.mkdir(parents=True, exist_ok=True)
-(wgs / "sample.bam").write_text("bam\\n")
-(wgs / "outputs.json").write_text(json.dumps({
-    "haplotagged_bam": str(wgs / "sample.bam"),
-    "sample_name": "sample",
-}))
+with Path(os.environ["LONGPIPE_RUNSHEET"]).open(newline="") as handle:
+    rows = list(csv.DictReader(handle))
+samples = [(row["lab_name"].strip() or row["core_name"].strip()) for row in rows]
+fire_samples = [
+    sample
+    for sample, row in zip(samples, rows)
+    if row["hia5"].strip().lower() in {"yes", "y", "true", "t", "1"}
+]
+
+fire = results / "fire"
+fire.mkdir(parents=True, exist_ok=True)
+(fire / "eligibility.tsv").write_text(
+    "sample\\tmean_depth\\tminimum_mean_depth\\teligible\\treason\\n"
+    + "".join(
+        f"{sample}\\t20\\t8\\tyes\\teligible\\n" for sample in fire_samples
+    )
+)
+for sample in fire_samples:
+    pileups = fire / "pileups"
+    pileups.mkdir(parents=True, exist_ok=True)
+    (pileups / f"{sample}-fire-v0.1.1-pileup.bed.gz").write_text(
+        f"invocation {count}\\n"
+    )
+    bigwigs = fire / "bigwigs"
+    bigwigs.mkdir(parents=True, exist_ok=True)
+    (bigwigs / f"{sample}-fire-v0.1.1-pileup_shrunk.bw").write_text(
+        "bigwig\\n"
+    )
+    for peak_set in ("brain_atac", "marrow_atac"):
+        ccre = fire / "ccre" / peak_set
+        ccre.mkdir(parents=True, exist_ok=True)
+        for statistic in ("max", "median", "sum"):
+            (ccre / f"{sample}_scATAC_{statistic}_scores.bed").write_text(
+                "ccre\\n"
+            )
+
+for sample in samples:
+    wgs = results / "wgs" / sample
+    wgs.mkdir(parents=True, exist_ok=True)
+    (wgs / f"{sample}.bam").write_text("bam\\n")
+    (wgs / "outputs.json").write_text(json.dumps({
+        "haplotagged_bam": str(wgs / f"{sample}.bam"),
+        "nested": {"files": [str(wgs / f"{sample}.bam")]},
+        "sample_name": sample,
+    }))
+
+    sv = results / "sv"
+    sv.mkdir(parents=True, exist_ok=True)
+    (sv / f"{sample}.sawfish.vcf.gz").write_text("vcf\\n")
+    (sv / f"{sample}.sawfish.vcf.gz.tbi").write_text("index\\n")
+    (sv / f"{sample}.supporting_reads.json.gz").write_text("reads\\n")
+    svtopo = sv / f"{sample}.svtopo"
+    svtopo.mkdir(parents=True, exist_ok=True)
+    (svtopo / "summary.tsv").write_text("svtopo\\n")
+
+    hla = results / "hla"
+    hla.mkdir(parents=True, exist_ok=True)
+    (hla / f"{sample}_hifihla_report.json").write_text("{}\\n")
+    (hla / f"{sample}_hifihla_report.tsv").write_text("hla\\n")
+    (hla / f"{sample}_hifihla_summary.tsv").write_text("hla\\n")
+if os.environ.get("FAKE_LONGPIPE_UNEXPECTED") == "yes":
+    (results / "unrouted").mkdir(parents=True, exist_ok=True)
 if os.environ.get("FAKE_LONGPIPE_RESULT") == "failure":
     print("simulated workflow failure")
     sys.exit(7)
@@ -178,51 +232,85 @@ print("simulated workflow success")
             result, output, error = self.invoke(arguments)
         self.assertEqual(result, 0, error)
         self.assertIn("Run completed", output)
+        sample = "Brain_1"
+        published_sample = run_directory / "samples" / sample
+        published_pileup = (
+            published_sample
+            / "fire"
+            / "pileups"
+            / f"{sample}-fire-v0.1.1-pileup.bed.gz"
+        )
         self.assertEqual(
-            (run_directory / "results" / "fire" / "result.txt").read_text(),
+            published_pileup.read_text(),
             "invocation 1\n",
         )
-        published_wgs = run_directory / "results" / "wgs" / "sample"
+        published_wgs = published_sample / "pbWGS"
         published_manifest = json.loads(
             (published_wgs / "outputs.json").read_text()
         )
         self.assertEqual(
-            published_manifest["haplotagged_bam"],
-            str(published_wgs / "sample.bam"),
+            Path(published_manifest["haplotagged_bam"]).resolve(),
+            (published_wgs / f"{sample}.bam").resolve(),
         )
-        self.assertEqual(published_manifest["sample_name"], "sample")
+        self.assertEqual(
+            [Path(path).resolve() for path in published_manifest["nested"]["files"]],
+            [(published_wgs / f"{sample}.bam").resolve()],
+        )
+        self.assertEqual(published_manifest["sample_name"], sample)
         scratch_manifest = json.loads(
             (
                 self.scratch
                 / "test-run"
                 / "results"
                 / "wgs"
-                / "sample"
+                / sample
                 / "outputs.json"
             ).read_text()
         )
         self.assertEqual(
-            scratch_manifest["haplotagged_bam"],
-            str(
+            Path(scratch_manifest["haplotagged_bam"]).resolve(),
+            (
                 self.scratch
                 / "test-run"
                 / "results"
                 / "wgs"
-                / "sample"
-                / "sample.bam"
-            ),
+                / sample
+                / f"{sample}.bam"
+            ).resolve(),
         )
+        self.assertTrue(
+            (published_sample / "sawfish" / f"{sample}.sawfish.vcf.gz").is_file()
+        )
+        self.assertTrue((published_sample / "svtopo" / "summary.tsv").is_file())
+        self.assertTrue(
+            (published_sample / "hla" / f"{sample}_hifihla_report.json").is_file()
+        )
+        self.assertTrue(
+            (
+                published_sample
+                / "fire"
+                / "ccre"
+                / "brain_atac"
+                / f"{sample}_scATAC_max_scores.bed"
+            ).is_file()
+        )
+        self.assertFalse((run_directory / "samples" / "BT54" / "fire").exists())
+        self.assertTrue(
+            (run_directory / "run-metadata" / "fire-eligibility.tsv").is_file()
+        )
+        self.assertFalse((run_directory / "results").exists())
         self.assertTrue((run_directory / "logs" / "rules" / "fake.log").is_file())
         self.assertTrue((run_directory / "benchmarks" / "fake.tsv").is_file())
         self.assertTrue((self.scratch / "test-run").is_dir())
 
+        legacy_results = run_directory / "results"
+        legacy_results.mkdir()
+        (legacy_results / "old-result.txt").write_text("old\n")
         with working_directory(self.work_one):
             result, _, error = self.invoke(arguments)
         self.assertEqual(result, 0, error)
-        self.assertEqual(
-            (run_directory / "results" / "fire" / "result.txt").read_text(),
-            "invocation 2\n",
-        )
+        self.assertEqual(published_pileup.read_text(), "invocation 2\n")
+        self.assertFalse(legacy_results.exists())
 
         invocation_directories = sorted(
             (run_directory / "run-metadata" / "invocations").iterdir()
@@ -236,10 +324,7 @@ print("simulated workflow success")
         with working_directory(self.work_one):
             result, _, error = self.invoke(arguments + ["--restart"])
         self.assertEqual(result, 0, error)
-        self.assertEqual(
-            (run_directory / "results" / "fire" / "result.txt").read_text(),
-            "invocation 1\n",
-        )
+        self.assertEqual(published_pileup.read_text(), "invocation 1\n")
 
         with working_directory(self.work_one):
             result, _, error = self.invoke(
@@ -254,7 +339,7 @@ print("simulated workflow success")
             )
         self.assertEqual(result, 0, error)
         self.assertFalse((self.scratch / "test-run").exists())
-        self.assertTrue((run_directory / "results").is_dir())
+        self.assertTrue((run_directory / "samples").is_dir())
 
     def test_failure_publishes_diagnostics_but_not_results(self):
         run_directory = self.setup_run(self.work_one, "failed-run")
@@ -265,7 +350,7 @@ print("simulated workflow success")
 
         self.assertEqual(result, 7)
         self.assertIn("Run failed with exit code 7", error)
-        self.assertFalse((run_directory / "results").exists())
+        self.assertFalse((run_directory / "samples").exists())
         self.assertTrue((run_directory / "logs" / "rules" / "fake.log").is_file())
         status = json.loads(
             (run_directory / "run-metadata" / "status.json").read_text()
@@ -273,6 +358,72 @@ print("simulated workflow success")
         self.assertEqual(status["status"], "failed")
         self.assertEqual(status["return_code"], 7)
         self.assertTrue((self.scratch / "failed-run" / "results").is_dir())
+
+    def test_resume_excludes_removed_samples_and_stale_fire(self):
+        run_directory = self.setup_run(self.work_one, "changed-run")
+        arguments = self.run_arguments("changed-run")
+        with working_directory(self.work_one):
+            result, _, error = self.invoke(arguments)
+        self.assertEqual(result, 0, error)
+        self.assertTrue((run_directory / "samples" / "Brain_1" / "fire").is_dir())
+        self.assertTrue((run_directory / "samples" / "BT54").is_dir())
+
+        (run_directory / "runsheet.csv").write_text(
+            "core_name,lab_name,run,cell,barcode,hifi_bam,sex,hia5\n"
+            "BT53,Brain_1,r84265_20260410_231712,1_A01,bc2081,,F,no\n"
+        )
+        with working_directory(self.work_one):
+            result, _, error = self.invoke(arguments)
+        self.assertEqual(result, 0, error)
+        self.assertFalse((run_directory / "samples" / "Brain_1" / "fire").exists())
+        self.assertFalse((run_directory / "samples" / "BT54").exists())
+        self.assertTrue(
+            (
+                self.scratch
+                / "changed-run"
+                / "results"
+                / "fire"
+                / "pileups"
+                / "Brain_1-fire-v0.1.1-pileup.bed.gz"
+            ).is_file()
+        )
+        self.assertTrue(
+            (
+                self.scratch
+                / "changed-run"
+                / "results"
+                / "wgs"
+                / "BT54"
+            ).is_dir()
+        )
+
+    def test_publication_failure_preserves_previous_sample_tree(self):
+        run_directory = self.setup_run(self.work_one, "publication-run")
+        arguments = self.run_arguments("publication-run")
+        with working_directory(self.work_one):
+            result, _, error = self.invoke(arguments)
+        self.assertEqual(result, 0, error)
+        pileup = (
+            run_directory
+            / "samples"
+            / "Brain_1"
+            / "fire"
+            / "pileups"
+            / "Brain_1-fire-v0.1.1-pileup.bed.gz"
+        )
+        self.assertEqual(pileup.read_text(), "invocation 1\n")
+
+        with working_directory(self.work_one), environment(
+            FAKE_LONGPIPE_UNEXPECTED="yes"
+        ):
+            result, _, error = self.invoke(arguments)
+        self.assertEqual(result, 2)
+        self.assertIn("publication failed", error)
+        self.assertEqual(pileup.read_text(), "invocation 1\n")
+        status = json.loads(
+            (run_directory / "run-metadata" / "status.json").read_text()
+        )
+        self.assertEqual(status["status"], "publication_failed")
 
     def test_scratch_ownership_prevents_cross_project_collision(self):
         self.setup_run(self.work_one, "shared-name")
