@@ -59,8 +59,19 @@ therefore be available on the submit and compute nodes, but no Longpipe Conda
 environment needs to be activated.
 
 MiniWDL and FIRE remain externally managed because both require site scheduler
-configuration. Set their executable and resource paths in each run's
-`config.yaml`.
+configuration. The `copy_pbWDL` and `shrink_fire_bed` executables from
+pacbiowdlR are also installed outside the per-rule Conda environments. Set
+their executable and resource paths in each run's `config.yaml`.
+
+The Furlan Lab MiniWDL deployment files are in `deploy/miniwdl/`. Its wrapper
+uses a shared engine and site configuration while keeping call and Singularity
+caches below the configured Longpipe scratch root. Set `MINIWDL_CACHE_ROOT` to
+use a different persistent cache location.
+
+Sawfish's `annotation_and_common_cnv` and sex-specific expected-copy-number
+BED files are reference inputs rather than software dependencies. Keep them in
+a shared, versioned reference directory matching the Sawfish version declared
+in `envs/sawfish.yaml`.
 
 The WDL checkout, reference map, and tertiary map must come from the same
 HiFi-human-WGS-WDL resource release.
@@ -227,7 +238,7 @@ On failure, Longpipe publishes logs, benchmarks, provenance, and failure status
 but does not publish partial scientific results. Scratch is retained after both
 success and failure.
 
-Remove scratch explicitly after results have been checked:
+Remove scratch explicitly after results have been checked if desired:
 
 ```bash
 longpipe clean 260410_BT-brain

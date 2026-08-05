@@ -529,6 +529,7 @@ rule fire_config:
             "ref": str(Path(input.reference).resolve()),
             "ref_name": "hg38",
             "manifest": str(Path(output.table).resolve()),
+            "full-version": True,
         }
         with open(output.config, "w", encoding="utf-8") as config_handle:
             yaml.safe_dump(fire_config, config_handle, sort_keys=False)

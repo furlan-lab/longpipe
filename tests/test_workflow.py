@@ -24,6 +24,39 @@ class ConfigSchemaTest(unittest.TestCase):
             schema["properties"]["fire_min_mean_depth"]["default"], 8.0
         )
 
+    def test_fire_version_defaults_to_shared_release(self):
+        schema = yaml.safe_load(
+            (REPOSITORY_ROOT / "schemas" / "config.schema.yaml").read_text()
+        )
+
+        self.assertEqual(
+            schema["properties"]["fire_version"]["default"], "v0.1.2"
+        )
+
+    def test_shared_miniwdl_deployment_is_pinned(self):
+        environment = yaml.safe_load(
+            (REPOSITORY_ROOT / "deploy" / "miniwdl" / "environment.yaml")
+            .read_text(encoding="utf-8")
+        )
+        dependencies = environment["dependencies"]
+        pip_dependencies = next(
+            dependency["pip"]
+            for dependency in dependencies
+            if isinstance(dependency, dict) and "pip" in dependency
+        )
+        config = yaml.safe_load(
+            (REPOSITORY_ROOT / "config" / "config.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertIn("miniwdl=1.15.0", dependencies)
+        self.assertIn("miniwdl-slurm==0.4.0", pip_dependencies)
+        self.assertEqual(
+            config["miniwdl_executable"],
+            "/fh/fast/furlan_s/grp/software/miniwdl/bin/miniwdl",
+        )
+
     def test_slurm_profile_allows_ten_wdl_drivers(self):
         profile = yaml.safe_load(
             (REPOSITORY_ROOT / "profiles" / "slurm" / "config.yaml").read_text()
@@ -143,6 +176,12 @@ class WorkflowDagTest(unittest.TestCase):
                 stderr=subprocess.STDOUT,
             )
             self.assertEqual(completed.returncode, 0, completed.stdout)
+
+            fire_config = yaml.safe_load(
+                (scratch_directory / "fibertools" / "FIRE" / "config.yaml")
+                .read_text(encoding="utf-8")
+            )
+            self.assertIs(fire_config["full-version"], True)
 
             resumed = subprocess.run(
                 [

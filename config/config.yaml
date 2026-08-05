@@ -5,7 +5,7 @@ default_sex: FEMALE
 hia5_gates_fiberseq: true
 hla_mode: contigs
 scatac_sorted: true
-fire_version: v0.1.1
+fire_version: v0.1.2
 fire_min_mean_depth: 8.0
 wdl_preemptible: true
 
@@ -20,15 +20,15 @@ ccre_peaks:
 
 ref_map_file: /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v2.0.0/GRCh38.ref_map.v2p0p0.tsv
 tertiary_map_file: /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v2.0.0/GRCh38.tertiary_map.v2p0p0.tsv
-wdl_singleton: /home/sfurlan/develop/HiFi-human-WGS-WDL/workflows/singleton.wdl
+wdl_singleton: /fh/fast/furlan_s/grp/software/HiFi-human-WGS-WDL/workflows/singleton.wdl
 
-fire_pixi: /home/sfurlan/software/FIRE/pixi.toml
-cnv_excluded_regions: /home/sfurlan/develop/sawfish/data/cnv_excluded_regions/annotation_and_common_cnv.hg38.bed.gz
-expected_cn_xx: /home/sfurlan/develop/sawfish/data/expected_cn/expected_cn.hg38.XX.bed
-expected_cn_xy: /home/sfurlan/develop/sawfish/data/expected_cn/expected_cn.hg38.XY.bed
+fire_pixi: /fh/fast/furlan_s/grp/software/FIRE/pixi.toml
+cnv_excluded_regions: /fh/fast/furlan_s/grp/refs/long_read_refs/sawfish-v2.2.1/GRCh38/cnv_excluded_regions/annotation_and_common_cnv.hg38.bed.gz
+expected_cn_xx: /fh/fast/furlan_s/grp/refs/long_read_refs/sawfish-v2.2.1/GRCh38/expected_cn/expected_cn.hg38.XX.bed
+expected_cn_xy: /fh/fast/furlan_s/grp/refs/long_read_refs/sawfish-v2.2.1/GRCh38/expected_cn/expected_cn.hg38.XY.bed
 
 # Externally managed nested workflow drivers and local helper programs
-miniwdl_executable: /home/sfurlan/miniforge3/envs/miniwdl/bin/miniwdl
+miniwdl_executable: /fh/fast/furlan_s/grp/software/miniwdl/bin/miniwdl
 pixi_executable: pixi
-copy_pbwdl_tool: /home/sfurlan/develop/pacbiowdlR/copy_pbWDL
-shrink_fire_bed_tool: /home/sfurlan/develop/pacbiowdlR/shrink_fire_bed
+copy_pbwdl_tool: /fh/fast/furlan_s/grp/software/pacbiowdlR/target/release/copy_pbWDL
+shrink_fire_bed_tool: /fh/fast/furlan_s/grp/software/pacbiowdlR/target/release/shrink_fire_bed

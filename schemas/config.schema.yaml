@@ -42,7 +42,7 @@ properties:
   fire_version:
     type: string
     pattern: "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
-    default: v0.1.1
+    default: v0.1.2
   fire_min_mean_depth:
     type: number
     minimum: 0

@@ -94,15 +94,15 @@ fire.mkdir(parents=True, exist_ok=True)
 for sample in fire_samples:
     pileups = fire / "pileups"
     pileups.mkdir(parents=True, exist_ok=True)
-    (pileups / f"{sample}-fire-v0.1.1-pileup.bed.gz").write_text(
+    (pileups / f"{sample}-fire-v0.1.2-pileup.bed.gz").write_text(
         f"invocation {count}\\n"
     )
-    (pileups / f"{sample}-fire-v0.1.1-pileup.bed.gz.tbi").write_text(
+    (pileups / f"{sample}-fire-v0.1.2-pileup.bed.gz.tbi").write_text(
         "index\\n"
     )
     bigwigs = fire / "bigwigs"
     bigwigs.mkdir(parents=True, exist_ok=True)
-    (bigwigs / f"{sample}-fire-v0.1.1-pileup_shrunk.bw").write_text(
+    (bigwigs / f"{sample}-fire-v0.1.2-pileup_shrunk.bw").write_text(
         "bigwig\\n"
     )
     for peak_set in ("brain_atac", "marrow_atac"):
@@ -241,7 +241,7 @@ print("simulated workflow success")
             published_sample
             / "fire"
             / "pileups"
-            / f"{sample}-fire-v0.1.1-pileup.bed.gz"
+            / f"{sample}-fire-v0.1.2-pileup.bed.gz"
         )
         self.assertEqual(
             published_pileup.read_text(),
@@ -387,7 +387,7 @@ print("simulated workflow success")
                 / "results"
                 / "fire"
                 / "pileups"
-                / "Brain_1-fire-v0.1.1-pileup.bed.gz"
+                / "Brain_1-fire-v0.1.2-pileup.bed.gz"
             ).is_file()
         )
         self.assertTrue(
@@ -412,7 +412,7 @@ print("simulated workflow success")
             / "Brain_1"
             / "fire"
             / "pileups"
-            / "Brain_1-fire-v0.1.1-pileup.bed.gz"
+            / "Brain_1-fire-v0.1.2-pileup.bed.gz"
         )
         self.assertEqual(pileup.read_text(), "invocation 1\n")
 
