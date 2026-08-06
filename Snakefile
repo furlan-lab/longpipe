@@ -1,5 +1,6 @@
 import glob
 import json
+import math
 import os
 import re
 from pathlib import Path
@@ -50,6 +51,10 @@ HLA_MODE = config["hla_mode"]
 SCATAC_SORTED = config["scatac_sorted"]
 FIRE_VERSION = config["fire_version"]
 FIRE_MIN_MEAN_DEPTH = float(config.get("fire_min_mean_depth", 8.0))
+FIRE_MEAN_DEPTH_OUTPUT_KEYS = (
+    "humanwgs_singleton.stat_depth_mean",
+    "humanwgs_singleton.stat_mean_depth",
+)
 
 FASTA = configured_path(config["ref_fasta"])
 FIRE_REF = configured_path(config["fire_ref"])
@@ -404,15 +409,21 @@ checkpoint fire_eligibility:
             with open(manifest_path, encoding="utf-8") as handle:
                 payload = json.load(handle)
             outputs = payload.get("outputs", payload)
-            try:
-                mean_depth = float(
-                    outputs["humanwgs_singleton.stat_mean_depth"]
-                )
-            except (KeyError, TypeError, ValueError) as error:
+            mean_depth = None
+            for output_key in FIRE_MEAN_DEPTH_OUTPUT_KEYS:
+                try:
+                    candidate = float(outputs[output_key])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if math.isfinite(candidate):
+                    mean_depth = candidate
+                    break
+            if mean_depth is None:
+                expected_keys = ", ".join(FIRE_MEAN_DEPTH_OUTPUT_KEYS)
                 raise ValueError(
                     f"{sample}: {manifest_path} does not contain a valid "
-                    "humanwgs_singleton.stat_mean_depth"
-                ) from error
+                    f"mean-depth output; expected one of: {expected_keys}"
+                )
 
             if mean_depth < params.minimum_mean_depth:
                 eligible = False

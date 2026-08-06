@@ -149,6 +149,13 @@ class WorkflowDagTest(unittest.TestCase):
                 pixi_executable="inputs/fake-pixi",
             )
 
+            Path(environment["LONGPIPE_RUNSHEET"]).write_text(
+                "core_name,lab_name,run,cell,barcode,hifi_bam,sex,hia5\n"
+                "sample,,,,,inputs/sample.bam,F,yes\n"
+                "current_key,,,,,inputs/sample.bam,F,yes\n",
+                encoding="utf-8",
+            )
+
             fake_pixi = inputs / "fake-pixi"
             fake_pixi.write_text(
                 "#!/usr/bin/env bash\n"
@@ -167,21 +174,22 @@ class WorkflowDagTest(unittest.TestCase):
             )
             fake_pixi.chmod(0o755)
 
-            pbwgs = scratch_directory / "pbWGS" / "sample"
-            pbwgs.mkdir(parents=True)
-            (pbwgs / "outputs.json").write_text(
-                json.dumps(
-                    {
-                        "outputs": {
-                            "humanwgs_singleton.stat_mean_depth": 20.0
-                        }
-                    }
-                ),
-                encoding="utf-8",
-            )
-            wgs = scratch_directory / "results" / "wgs" / "sample"
-            wgs.mkdir(parents=True)
-            (wgs / "sample.GRCh38.haplotagged.bam").touch()
+            depth_outputs = {
+                "sample": {"humanwgs_singleton.stat_mean_depth": 20.0},
+                "current_key": {
+                    "humanwgs_singleton.stat_depth_mean": 21.0
+                },
+            }
+            for sample, outputs in depth_outputs.items():
+                pbwgs = scratch_directory / "pbWGS" / sample
+                pbwgs.mkdir(parents=True)
+                (pbwgs / "outputs.json").write_text(
+                    json.dumps({"outputs": outputs}),
+                    encoding="utf-8",
+                )
+                wgs = scratch_directory / "results" / "wgs" / sample
+                wgs.mkdir(parents=True)
+                (wgs / f"{sample}.GRCh38.haplotagged.bam").touch()
 
             target = (
                 "results/fire/pileups/"
