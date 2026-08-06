@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from importlib.metadata import version
 from pathlib import Path
+from unittest import mock
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -165,6 +166,37 @@ print("simulated workflow success")
             cli.main(["--version"])
 
         self.assertEqual(stdout.getvalue().strip(), version("longpipe"))
+
+    def test_run_uses_snakemake_installed_beside_longpipe(self):
+        run_directory = self.setup_run(self.work_one, "sibling-snakemake")
+        sibling_directory = self.root / "pipx" / "bin"
+        sibling_directory.mkdir(parents=True)
+        sibling_snakemake = sibling_directory / "snakemake"
+        sibling_snakemake.write_bytes(self.fake_snakemake.read_bytes())
+        sibling_snakemake.chmod(self.fake_snakemake.stat().st_mode)
+
+        arguments = [
+            "run",
+            "sibling-snakemake",
+            "--project-root",
+            str(self.project),
+            "--scratch-root",
+            str(self.scratch),
+        ]
+        with (
+            mock.patch.object(
+                cli.sys, "executable", str(sibling_directory / "python")
+            ),
+            environment(LONGPIPE_SNAKEMAKE=""),
+            working_directory(self.work_one),
+        ):
+            result, _, error = self.invoke(arguments)
+
+        self.assertEqual(result, 0, error)
+        status = json.loads(
+            (run_directory / "run-metadata" / "status.json").read_text()
+        )
+        self.assertEqual(status["command"][0], str(sibling_snakemake))
 
     def invoke(self, arguments: list[str]) -> tuple[int, str, str]:
         stdout = io.StringIO()

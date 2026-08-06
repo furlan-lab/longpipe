@@ -714,6 +714,28 @@ def _snakemake_command(
     ]
 
 
+def _resolve_snakemake_executable(explicit: str | None) -> str:
+    if explicit:
+        return explicit
+
+    environment_override = os.environ.get("LONGPIPE_SNAKEMAKE")
+    if environment_override:
+        return environment_override
+
+    sibling = Path(sys.executable).with_name("snakemake")
+    if sibling.is_file() and os.access(sibling, os.X_OK):
+        return str(sibling)
+
+    executable = shutil.which("snakemake")
+    if executable:
+        return executable
+
+    raise LongpipeError(
+        "could not locate Snakemake; reinstall Longpipe with Pipx or use "
+        "--snakemake-executable"
+    )
+
+
 def _stream_command(
     command: Sequence[str],
     environment: dict[str, str],
@@ -788,6 +810,9 @@ def _run(args: argparse.Namespace) -> int:
         args.scratch_root, args.run_name
     )
     workflow_root = _workflow_root()
+    snakemake_executable = _resolve_snakemake_executable(
+        args.snakemake_executable
+    )
 
     with _run_lock(scratch_root, args.run_name, run_directory):
         if scratch_directory.exists():
@@ -803,7 +828,9 @@ def _run(args: argparse.Namespace) -> int:
         )
         config, _ = _load_run_config(config_snapshot, config_snapshot.parent)
         command = _snakemake_command(
-            args.snakemake_executable, workflow_root, config_snapshot
+            snakemake_executable,
+            workflow_root,
+            config_snapshot,
         )
         status: dict[str, object] = {
             "command": command,
@@ -952,8 +979,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument(
         "--snakemake-executable",
-        default=os.environ.get("LONGPIPE_SNAKEMAKE", "snakemake"),
-        help="Snakemake executable (default: LONGPIPE_SNAKEMAKE or %(default)s)",
+        default=None,
+        help=(
+            "Snakemake executable (default: LONGPIPE_SNAKEMAKE, the executable "
+            "installed alongside Longpipe, or PATH)"
+        ),
     )
     run_parser.set_defaults(handler=_run)
 
