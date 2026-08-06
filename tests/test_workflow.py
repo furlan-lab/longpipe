@@ -57,6 +57,35 @@ class ConfigSchemaTest(unittest.TestCase):
             "/fh/fast/furlan_s/grp/software/miniwdl/bin/miniwdl",
         )
 
+    def test_pacbio_references_use_v3_bundle(self):
+        config = yaml.safe_load(
+            (REPOSITORY_ROOT / "config" / "config.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        reference_keys = (
+            "ref_fasta",
+            "fire_ref",
+            "chrom_sizes",
+            "ref_map_file",
+            "tertiary_map_file",
+            "cnv_excluded_regions",
+            "expected_cn_xx",
+            "expected_cn_xy",
+        )
+
+        for key in reference_keys:
+            with self.subTest(key=key):
+                self.assertIn("/hifi-wdl-resources-v3.1.0/", config[key])
+        self.assertTrue(
+            config["ref_map_file"].endswith("GRCh38.ref_map.v3p1p0.tsv")
+        )
+        self.assertTrue(
+            config["tertiary_map_file"].endswith(
+                "GRCh38.tertiary_map.v3p1p0.tsv"
+            )
+        )
+
     def test_slurm_profile_allows_ten_wdl_drivers(self):
         profile = yaml.safe_load(
             (REPOSITORY_ROOT / "profiles" / "slurm" / "config.yaml").read_text()

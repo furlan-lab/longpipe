@@ -10,22 +10,22 @@ fire_min_mean_depth: 8.0
 wdl_preemptible: true
 
 # References
-ref_fasta: /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v2.0.0/GRCh38/human_GRCh38_no_alt_analysis_set.fasta
-fire_ref: /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v2.0.0/GRCh38/human_GRCh38_no_alt_analysis_set.fasta
+ref_fasta: /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v3.1.0/GRCh38/human_GRCh38_no_alt_analysis_set.fasta
+fire_ref: /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v3.1.0/GRCh38/human_GRCh38_no_alt_analysis_set.fasta
 hla_ref_fasta: /fh/fast/furlan_s/grp/refs/GRCh38/GRCh38_no_alt.fa
-chrom_sizes: /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v2.0.0/GRCh38/chrom_sizes
+chrom_sizes: /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v3.1.0/GRCh38/chrom_sizes
 ccre_peaks:
   brain_atac: /fh/fast/furlan_s/grp/experiments/tumor_fiberseq/SMHF/refs/cCRE_features.bed.gz
   marrow_atac: /fh/fast/furlan_s/grp/experiments/tumor_fiberseq/GL_ATAC/scATACpeaks_karyotypic_hg38.bed
 
-ref_map_file: /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v2.0.0/GRCh38.ref_map.v2p0p0.tsv
-tertiary_map_file: /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v2.0.0/GRCh38.tertiary_map.v2p0p0.tsv
+ref_map_file: /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v3.1.0/GRCh38.ref_map.v3p1p0.tsv
+tertiary_map_file: /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v3.1.0/GRCh38.tertiary_map.v3p1p0.tsv
 wdl_singleton: /fh/fast/furlan_s/grp/software/HiFi-human-WGS-WDL/workflows/singleton.wdl
 
 fire_pixi: /fh/fast/furlan_s/grp/software/FIRE/pixi.toml
-cnv_excluded_regions: /fh/fast/furlan_s/grp/refs/long_read_refs/sawfish-v2.2.1/GRCh38/cnv_excluded_regions/annotation_and_common_cnv.hg38.bed.gz
-expected_cn_xx: /fh/fast/furlan_s/grp/refs/long_read_refs/sawfish-v2.2.1/GRCh38/expected_cn/expected_cn.hg38.XX.bed
-expected_cn_xy: /fh/fast/furlan_s/grp/refs/long_read_refs/sawfish-v2.2.1/GRCh38/expected_cn/expected_cn.hg38.XY.bed
+cnv_excluded_regions: /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v3.1.0/GRCh38/sawfish/annotation_and_common_cnv.hg38.bed.gz
+expected_cn_xx: /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v3.1.0/GRCh38/sawfish/expected_cn.hg38.XX.bed
+expected_cn_xy: /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v3.1.0/GRCh38/sawfish/expected_cn.hg38.XY.bed
 
 # Externally managed nested workflow drivers and local helper programs
 miniwdl_executable: /fh/fast/furlan_s/grp/software/miniwdl/bin/miniwdl
