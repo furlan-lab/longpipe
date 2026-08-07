@@ -63,6 +63,7 @@ import sys
 from pathlib import Path
 
 scratch = Path(os.environ["LONGPIPE_SCRATCH_DIR"])
+fire_only = "fire_only" in sys.argv[1:]
 (scratch / "logs" / "rules").mkdir(parents=True, exist_ok=True)
 (scratch / "logs" / "rules" / "fake.log").write_text("diagnostic\\n")
 (scratch / "benchmarks").mkdir(parents=True, exist_ok=True)
@@ -96,7 +97,7 @@ for sample in fire_samples:
     pileups = fire / "pileups"
     pileups.mkdir(parents=True, exist_ok=True)
     (pileups / f"{sample}-fire-v0.1.2-pileup.bed.gz").write_text(
-        f"invocation {count}\\n"
+        f"{'fire-only ' if fire_only else ''}invocation {count}\\n"
     )
     (pileups / f"{sample}-fire-v0.1.2-pileup.bed.gz.tbi").write_text(
         "index\\n"
@@ -106,38 +107,57 @@ for sample in fire_samples:
     (bigwigs / f"{sample}-fire-v0.1.2-pileup_shrunk.bw").write_text(
         "bigwig\\n"
     )
-    for peak_set in ("brain_atac", "marrow_atac"):
-        ccre = fire / "ccre" / peak_set
-        ccre.mkdir(parents=True, exist_ok=True)
-        for statistic in ("max", "median", "sum"):
-            (ccre / f"{sample}_scATAC_{statistic}_scores.bed").write_text(
-                "ccre\\n"
-            )
+    tracks = fire / "haplotypes" / "tracks"
+    tracks.mkdir(parents=True, exist_ok=True)
+    for track_name in (
+        f"{sample}-fire-v0.1.2-H1-percent-accessible.bw",
+        f"{sample}-fire-v0.1.2-H2-percent-accessible.bw",
+        f"{sample}-fire-v0.1.2-H1-minus-H2-percent-accessible.bw",
+    ):
+        (tracks / track_name).write_text("haplotype track\\n")
+    differences = fire / "haplotypes" / "differences"
+    differences.mkdir(parents=True, exist_ok=True)
+    differences_name = f"{sample}-fire-v0.1.2-haplotype-differences.bed.gz"
+    (differences / differences_name).write_text("haplotype differences\\n")
+    (differences / f"{differences_name}.tbi").write_text("index\\n")
+    (
+        differences
+        / f"{sample}-fire-v0.1.2-haplotype-differences-summary.tsv"
+    ).write_text("metric\\tvalue\\n")
+    if not fire_only:
+        for peak_set in ("brain_atac", "marrow_atac"):
+            ccre = fire / "ccre" / peak_set
+            ccre.mkdir(parents=True, exist_ok=True)
+            for statistic in ("max", "median", "sum"):
+                (ccre / f"{sample}_scATAC_{statistic}_scores.bed").write_text(
+                    "ccre\\n"
+                )
 
-for sample in samples:
-    wgs = results / "wgs" / sample
-    wgs.mkdir(parents=True, exist_ok=True)
-    (wgs / f"{sample}.bam").write_text("bam\\n")
-    (wgs / "outputs.json").write_text(json.dumps({
-        "haplotagged_bam": str(wgs / f"{sample}.bam"),
-        "nested": {"files": [str(wgs / f"{sample}.bam")]},
-        "sample_name": sample,
-    }))
+if not fire_only:
+    for sample in samples:
+        wgs = results / "wgs" / sample
+        wgs.mkdir(parents=True, exist_ok=True)
+        (wgs / f"{sample}.bam").write_text("bam\\n")
+        (wgs / "outputs.json").write_text(json.dumps({
+            "haplotagged_bam": str(wgs / f"{sample}.bam"),
+            "nested": {"files": [str(wgs / f"{sample}.bam")]},
+            "sample_name": sample,
+        }))
 
-    sv = results / "sv"
-    sv.mkdir(parents=True, exist_ok=True)
-    (sv / f"{sample}.sawfish.vcf.gz").write_text("vcf\\n")
-    (sv / f"{sample}.sawfish.vcf.gz.tbi").write_text("index\\n")
-    (sv / f"{sample}.supporting_reads.json.gz").write_text("reads\\n")
-    svtopo = sv / f"{sample}.svtopo"
-    svtopo.mkdir(parents=True, exist_ok=True)
-    (svtopo / "summary.tsv").write_text("svtopo\\n")
+        sv = results / "sv"
+        sv.mkdir(parents=True, exist_ok=True)
+        (sv / f"{sample}.sawfish.vcf.gz").write_text("vcf\\n")
+        (sv / f"{sample}.sawfish.vcf.gz.tbi").write_text("index\\n")
+        (sv / f"{sample}.supporting_reads.json.gz").write_text("reads\\n")
+        svtopo = sv / f"{sample}.svtopo"
+        svtopo.mkdir(parents=True, exist_ok=True)
+        (svtopo / "summary.tsv").write_text("svtopo\\n")
 
-    hla = results / "hla"
-    hla.mkdir(parents=True, exist_ok=True)
-    (hla / f"{sample}_hifihla_report.json").write_text("{}\\n")
-    (hla / f"{sample}_hifihla_report.tsv").write_text("hla\\n")
-    (hla / f"{sample}_hifihla_summary.tsv").write_text("hla\\n")
+        hla = results / "hla"
+        hla.mkdir(parents=True, exist_ok=True)
+        (hla / f"{sample}_hifihla_report.json").write_text("{}\\n")
+        (hla / f"{sample}_hifihla_report.tsv").write_text("hla\\n")
+        (hla / f"{sample}_hifihla_summary.tsv").write_text("hla\\n")
 if os.environ.get("FAKE_LONGPIPE_UNEXPECTED") == "yes":
     (results / "unrouted").mkdir(parents=True, exist_ok=True)
 if os.environ.get("FAKE_LONGPIPE_RESULT") == "failure":
@@ -329,6 +349,24 @@ print("simulated workflow success")
                 / f"{sample}_scATAC_max_scores.bed"
             ).is_file()
         )
+        self.assertTrue(
+            (
+                published_sample
+                / "fire"
+                / "haplotypes"
+                / "tracks"
+                / f"{sample}-fire-v0.1.2-H1-percent-accessible.bw"
+            ).is_file()
+        )
+        self.assertTrue(
+            (
+                published_sample
+                / "fire"
+                / "haplotypes"
+                / "differences"
+                / f"{sample}-fire-v0.1.2-haplotype-differences.bed.gz"
+            ).is_file()
+        )
         self.assertFalse((run_directory / "samples" / "BT54" / "fire").exists())
         self.assertTrue(
             (run_directory / "run-metadata" / "fire-eligibility.tsv").is_file()
@@ -375,6 +413,62 @@ print("simulated workflow success")
         self.assertEqual(result, 0, error)
         self.assertFalse((self.scratch / "test-run").exists())
         self.assertTrue((run_directory / "samples").is_dir())
+
+    def test_fire_only_updates_fire_and_preserves_other_results(self):
+        run_directory = self.setup_run(self.work_one, "fire-only-run")
+        arguments = self.run_arguments("fire-only-run")
+        with working_directory(self.work_one):
+            result, _, error = self.invoke(arguments)
+        self.assertEqual(result, 0, error)
+
+        sample = "Brain_1"
+        published_sample = run_directory / "samples" / sample
+        pileup = (
+            published_sample
+            / "fire"
+            / "pileups"
+            / f"{sample}-fire-v0.1.2-pileup.bed.gz"
+        )
+        ccre = (
+            published_sample
+            / "fire"
+            / "ccre"
+            / "brain_atac"
+            / f"{sample}_scATAC_max_scores.bed"
+        )
+        ccre.write_text("preserve this cCRE\n")
+        wgs_manifest = published_sample / "pbWGS" / "outputs.json"
+        sv_vcf = published_sample / "sawfish" / f"{sample}.sawfish.vcf.gz"
+        hla_report = published_sample / "hla" / f"{sample}_hifihla_report.json"
+        preserved_outputs = {
+            path: path.read_bytes()
+            for path in (wgs_manifest, sv_vcf, hla_report)
+        }
+
+        with working_directory(self.work_one):
+            result, output, error = self.invoke(
+                arguments + ["--only-fire", "--restart"]
+            )
+
+        self.assertEqual(result, 0, error)
+        self.assertIn("FIRE-only run completed", output)
+        self.assertEqual(pileup.read_text(), "fire-only invocation 1\n")
+        self.assertEqual(ccre.read_text(), "preserve this cCRE\n")
+        for path, expected in preserved_outputs.items():
+            with self.subTest(path=path):
+                self.assertEqual(path.read_bytes(), expected)
+        self.assertFalse(
+            (self.scratch / "fire-only-run" / "results" / "sv").exists()
+        )
+        self.assertFalse(
+            (self.scratch / "fire-only-run" / "results" / "hla").exists()
+        )
+        status = json.loads(
+            (run_directory / "run-metadata" / "status.json").read_text()
+        )
+        self.assertEqual(status["mode"], "fire_only")
+        self.assertEqual(status["command"][-1], "fire_only")
+        self.assertEqual(status["status"], "success")
 
     def test_failure_publishes_diagnostics_but_not_results(self):
         run_directory = self.setup_run(self.work_one, "failed-run")

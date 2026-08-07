@@ -491,6 +491,67 @@ def _rewrite_published_wgs_manifest(
     _atomic_write_json(manifest, rewritten)
 
 
+def _copy_fire_sample_outputs(
+    scratch_fire: Path,
+    destination: Path,
+    sample: str,
+    peak_sets: set[str] | None,
+    fire_version: str,
+) -> None:
+    pileup_name = f"{sample}-fire-{fire_version}-pileup.bed.gz"
+    _copy_required_output(
+        scratch_fire / "pileups" / pileup_name,
+        destination / "pileups" / pileup_name,
+    )
+    _copy_required_output(
+        scratch_fire / "pileups" / f"{pileup_name}.tbi",
+        destination / "pileups" / f"{pileup_name}.tbi",
+    )
+    bigwig_name = f"{sample}-fire-{fire_version}-pileup_shrunk.bw"
+    _copy_required_output(
+        scratch_fire / "bigwigs" / bigwig_name,
+        destination / "bigwigs" / bigwig_name,
+    )
+    track_names = (
+        f"{sample}-fire-{fire_version}-H1-percent-accessible.bw",
+        f"{sample}-fire-{fire_version}-H2-percent-accessible.bw",
+        (
+            f"{sample}-fire-{fire_version}-"
+            "H1-minus-H2-percent-accessible.bw"
+        ),
+    )
+    for track_name in track_names:
+        _copy_required_output(
+            scratch_fire / "haplotypes" / "tracks" / track_name,
+            destination / "haplotypes" / "tracks" / track_name,
+        )
+    differences_name = (
+        f"{sample}-fire-{fire_version}-haplotype-differences.bed.gz"
+    )
+    difference_files = (
+        differences_name,
+        f"{differences_name}.tbi",
+        (
+            f"{sample}-fire-{fire_version}-"
+            "haplotype-differences-summary.tsv"
+        ),
+    )
+    for difference_name in difference_files:
+        _copy_required_output(
+            scratch_fire / "haplotypes" / "differences" / difference_name,
+            destination / "haplotypes" / "differences" / difference_name,
+        )
+    if peak_sets is None:
+        return
+    for peak_set in peak_sets:
+        for statistic in ("max", "median", "sum"):
+            ccre_name = f"{sample}_scATAC_{statistic}_scores.bed"
+            _copy_required_output(
+                scratch_fire / "ccre" / peak_set / ccre_name,
+                destination / "ccre" / peak_set / ccre_name,
+            )
+
+
 def _build_sample_results(
     stage: Path,
     scratch_results: Path,
@@ -554,7 +615,13 @@ def _build_sample_results(
         )
 
     scratch_fire = scratch_results / "fire"
-    expected_fire_entries = {"bigwigs", "ccre", "eligibility.tsv", "pileups"}
+    expected_fire_entries = {
+        "bigwigs",
+        "ccre",
+        "eligibility.tsv",
+        "haplotypes",
+        "pileups",
+    }
     unexpected_fire_entries = sorted(
         entry
         for entry in scratch_fire.iterdir()
@@ -565,27 +632,13 @@ def _build_sample_results(
             f"unexpected FIRE result: {unexpected_fire_entries[0]}"
         )
     for sample in eligible_fire_samples:
-        pileup_name = f"{sample}-fire-{fire_version}-pileup.bed.gz"
-        _copy_required_output(
-            scratch_fire / "pileups" / pileup_name,
-            stage / sample / "fire" / "pileups" / pileup_name,
+        _copy_fire_sample_outputs(
+            scratch_fire,
+            stage / sample / "fire",
+            sample,
+            peak_sets,
+            fire_version,
         )
-        _copy_required_output(
-            scratch_fire / "pileups" / f"{pileup_name}.tbi",
-            stage / sample / "fire" / "pileups" / f"{pileup_name}.tbi",
-        )
-        bigwig_name = f"{sample}-fire-{fire_version}-pileup_shrunk.bw"
-        _copy_required_output(
-            scratch_fire / "bigwigs" / bigwig_name,
-            stage / sample / "fire" / "bigwigs" / bigwig_name,
-        )
-        for peak_set in peak_sets:
-            for statistic in ("max", "median", "sum"):
-                ccre_name = f"{sample}_scATAC_{statistic}_scores.bed"
-                _copy_required_output(
-                    scratch_fire / "ccre" / peak_set / ccre_name,
-                    stage / sample / "fire" / "ccre" / peak_set / ccre_name,
-                )
 
     scratch_sv = scratch_results / "sv"
     if not scratch_sv.is_dir():
@@ -680,6 +733,82 @@ def _publish_sample_results(
         shutil.rmtree(legacy_results)
 
 
+def _publish_fire_only_results(
+    scratch_results: Path,
+    run_directory: Path,
+    runsheet_snapshot: Path,
+    config: dict,
+) -> None:
+    if not scratch_results.is_dir():
+        raise LongpipeError(
+            f"expected workflow output directory is missing: {scratch_results}"
+        )
+    sample_names = _sample_labels(runsheet_snapshot)
+    fire_version = config.get("fire_version")
+    if not isinstance(fire_version, str) or not fire_version:
+        raise LongpipeError("fire_version must be a non-empty string")
+    scratch_fire = scratch_results / "fire"
+    if not scratch_fire.is_dir():
+        raise LongpipeError(
+            f"expected workflow output directory is missing: {scratch_fire}"
+        )
+    allowed_fire_entries = {
+        "bigwigs",
+        "ccre",
+        "eligibility.tsv",
+        "haplotypes",
+        "pileups",
+    }
+    unexpected_fire_entries = sorted(
+        entry
+        for entry in scratch_fire.iterdir()
+        if entry.name not in allowed_fire_entries
+    )
+    if unexpected_fire_entries:
+        raise LongpipeError(
+            f"unexpected FIRE result: {unexpected_fire_entries[0]}"
+        )
+    eligible_samples = _read_fire_eligibility(
+        scratch_fire / "eligibility.tsv",
+        set(sample_names),
+    )
+    durable_samples = run_directory / "samples"
+    for sample in sample_names:
+        destination = durable_samples / sample / "fire"
+        if sample not in eligible_samples:
+            if destination.is_symlink() or destination.is_file():
+                destination.unlink()
+            elif destination.is_dir():
+                shutil.rmtree(destination)
+            continue
+
+        existing_ccre = destination / "ccre"
+
+        def build(
+            stage: Path,
+            sample_name: str = sample,
+            preserved_ccre: Path = existing_ccre,
+        ) -> None:
+            stage.mkdir()
+            if preserved_ccre.is_dir():
+                shutil.copytree(preserved_ccre, stage / "ccre")
+            _copy_fire_sample_outputs(
+                scratch_fire,
+                stage,
+                sample_name,
+                None,
+                fire_version,
+            )
+
+        _replace_built_tree(destination, build)
+
+    _atomic_copy(
+        scratch_fire / "eligibility.tsv",
+        run_directory / "run-metadata" / "fire-eligibility.tsv",
+        required=True,
+    )
+
+
 def _publish_snakemake_metadata(
     scratch_directory: Path, durable_invocation: Path
 ) -> None:
@@ -701,7 +830,10 @@ def _publish_diagnostics(
 
 
 def _snakemake_command(
-    executable: str, workflow_root: Path, config_snapshot: Path
+    executable: str,
+    workflow_root: Path,
+    config_snapshot: Path,
+    targets: Sequence[str] = (),
 ) -> list[str]:
     return [
         executable,
@@ -711,6 +843,7 @@ def _snakemake_command(
         str(workflow_root / "profiles" / "slurm"),
         "--configfile",
         str(config_snapshot),
+        *targets,
     ]
 
 
@@ -827,10 +960,13 @@ def _run(args: argparse.Namespace) -> int:
             run_directory, scratch_directory, invocation_id
         )
         config, _ = _load_run_config(config_snapshot, config_snapshot.parent)
+        run_mode = "fire_only" if args.only_fire else "full"
+        targets = ("fire_only",) if args.only_fire else ()
         command = _snakemake_command(
             snakemake_executable,
             workflow_root,
             config_snapshot,
+            targets,
         )
         status: dict[str, object] = {
             "command": command,
@@ -838,6 +974,7 @@ def _run(args: argparse.Namespace) -> int:
             "invocation_id": invocation_id,
             "pid": os.getpid(),
             "run_directory": str(run_directory),
+            "mode": run_mode,
             "run_name": args.run_name,
             "scratch_directory": str(scratch_directory),
             "started_at": _now(),
@@ -856,7 +993,8 @@ def _run(args: argparse.Namespace) -> int:
             }
         )
 
-        print(f"Running {args.run_name!r} in {scratch_directory}")
+        mode_label = "FIRE only" if args.only_fire else "full workflow"
+        print(f"Running {mode_label} for {args.run_name!r} in {scratch_directory}")
         try:
             return_code = _stream_command(
                 command,
@@ -879,12 +1017,20 @@ def _run(args: argparse.Namespace) -> int:
             )
             if return_code == 0:
                 scratch_results = scratch_directory / "results"
-                _publish_sample_results(
-                    scratch_results,
-                    run_directory,
-                    runsheet_snapshot,
-                    config,
-                )
+                if args.only_fire:
+                    _publish_fire_only_results(
+                        scratch_results,
+                        run_directory,
+                        runsheet_snapshot,
+                        config,
+                    )
+                else:
+                    _publish_sample_results(
+                        scratch_results,
+                        run_directory,
+                        runsheet_snapshot,
+                        config,
+                    )
         except BaseException as error:
             status["error"] = f"publication failed: {error}"
             status["status"] = "publication_failed"
@@ -896,7 +1042,11 @@ def _run(args: argparse.Namespace) -> int:
         status["finished_at"] = _now()
         _record_status(status, scratch_directory, run_directory, durable_invocation)
         if return_code == 0:
-            print(f"Run completed; results published to {run_directory / 'samples'}")
+            completion = "FIRE-only run" if args.only_fire else "Run"
+            print(
+                f"{completion} completed; results published to "
+                f"{run_directory / 'samples'}"
+            )
         else:
             print(
                 f"Run failed with exit code {return_code}; diagnostics published to "
@@ -976,6 +1126,14 @@ def _parser() -> argparse.ArgumentParser:
         "--restart",
         action="store_true",
         help="discard this run's existing scratch state before starting",
+    )
+    run_parser.add_argument(
+        "--only-fire",
+        action="store_true",
+        help=(
+            "run FIRE and required upstream dependencies while skipping cCRE, "
+            "SV, and HLA targets"
+        ),
     )
     run_parser.add_argument(
         "--snakemake-executable",

@@ -1,0 +1,11 @@
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.10
+  - numpy=1.24
+  - pandas=1.4
+  - pyarrow
+  - pip
+  - pip:
+      - polars-lts-cpu==1.7.1

@@ -12,7 +12,8 @@ required:
   - ref_map_file
   - tertiary_map_file
   - wdl_singleton
-  - fire_pixi
+  - fire_upstream_commit
+  - fire_exclude_regions
   - cnv_excluded_regions
   - expected_cn_xx
   - expected_cn_xy
@@ -41,12 +42,57 @@ properties:
     default: true
   fire_version:
     type: string
-    pattern: "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+    const: v0.1.2
     default: v0.1.2
+  fire_upstream_commit:
+    type: string
+    const: e7f2aae1f59bbb74c46e1f27936da380cb074704
   fire_min_mean_depth:
     type: number
     minimum: 0
     default: 8.0
+  fire_min_coverage:
+    type: integer
+    minimum: 0
+    default: 4
+  fire_coverage_within_n_sd:
+    type: number
+    exclusiveMinimum: 0
+    default: 5.0
+  fire_filter_flag:
+    type: integer
+    minimum: 0
+    default: 260
+  fire_min_msp:
+    type: integer
+    minimum: 0
+    default: 10
+  fire_min_average_msp_size:
+    type: integer
+    minimum: 0
+    default: 10
+  fire_min_contig_length:
+    type: integer
+    minimum: 0
+    default: 0
+  fire_keep_chromosomes:
+    type: string
+    minLength: 1
+    default: ".*"
+  fire_haplotype_min_coverage:
+    type: integer
+    minimum: 1
+    default: 10
+  fire_haplotype_max_fdr:
+    type: number
+    minimum: 0
+    maximum: 1
+    default: 0.05
+  fire_haplotype_qvalue:
+    type: number
+    minimum: 0
+    maximum: 1
+    default: 0.05
   wdl_preemptible:
     type: boolean
     default: true
@@ -79,9 +125,13 @@ properties:
   wdl_singleton:
     type: string
     minLength: 1
-  fire_pixi:
-    type: string
-    minLength: 1
+  fire_exclude_regions:
+    type: array
+    minItems: 1
+    uniqueItems: true
+    items:
+      type: string
+      minLength: 1
   cnv_excluded_regions:
     type: string
     minLength: 1
@@ -95,10 +145,6 @@ properties:
     type: string
     minLength: 1
     default: miniwdl
-  pixi_executable:
-    type: string
-    minLength: 1
-    default: pixi
   copy_pbwdl_tool:
     type: string
     minLength: 1

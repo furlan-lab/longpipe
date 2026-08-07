@@ -6,7 +6,6 @@ import re
 from pathlib import Path
 
 import pandas as pd
-import yaml
 from snakemake.utils import min_version, validate
 
 
@@ -51,6 +50,23 @@ HLA_MODE = config["hla_mode"]
 SCATAC_SORTED = config["scatac_sorted"]
 FIRE_VERSION = config["fire_version"]
 FIRE_MIN_MEAN_DEPTH = float(config.get("fire_min_mean_depth", 8.0))
+FIRE_UPSTREAM_COMMIT = config["fire_upstream_commit"]
+FIRE_MIN_COVERAGE = int(config.get("fire_min_coverage", 4))
+FIRE_COVERAGE_WITHIN_N_SD = float(
+    config.get("fire_coverage_within_n_sd", 5.0)
+)
+FIRE_FILTER_FLAG = int(config.get("fire_filter_flag", 260))
+FIRE_MIN_MSP = int(config.get("fire_min_msp", 10))
+FIRE_MIN_AVERAGE_MSP_SIZE = int(
+    config.get("fire_min_average_msp_size", 10)
+)
+FIRE_MIN_CONTIG_LENGTH = int(config.get("fire_min_contig_length", 0))
+FIRE_KEEP_CHROMOSOMES = config.get("fire_keep_chromosomes", ".*")
+FIRE_HAPLOTYPE_MIN_COVERAGE = int(
+    config.get("fire_haplotype_min_coverage", 10)
+)
+FIRE_HAPLOTYPE_MAX_FDR = float(config.get("fire_haplotype_max_fdr", 0.05))
+FIRE_HAPLOTYPE_QVALUE = float(config.get("fire_haplotype_qvalue", 0.05))
 FIRE_MEAN_DEPTH_OUTPUT_KEYS = (
     "humanwgs_singleton.stat_depth_mean",
     "humanwgs_singleton.stat_mean_depth",
@@ -68,7 +84,9 @@ CCRE_PEAK_SETS = list(CCRE_PEAKS)
 REF_MAP = configured_path(config["ref_map_file"])
 TERTIARY_MAP = configured_path(config["tertiary_map_file"])
 WDL = configured_path(config["wdl_singleton"])
-FIRE_PIXI = configured_path(config["fire_pixi"])
+FIRE_EXCLUDE_REGIONS = [
+    configured_path(path) for path in config["fire_exclude_regions"]
+]
 CNV_EXCLUDED = configured_path(config["cnv_excluded_regions"])
 EXPECTED_CN = {
     "MALE": configured_path(config["expected_cn_xy"]),
@@ -78,24 +96,44 @@ EXPECTED_CN = {
 COPY_PBWDL = configured_path(config["copy_pbwdl_tool"])
 SHRINK_FIRE_BED = configured_path(config["shrink_fire_bed_tool"])
 MINIWDL = configured_executable(config["miniwdl_executable"])
-PIXI = configured_executable(config["pixi_executable"])
 
 FIRE_PILEUP = (
     f"results/fire/pileups/"
     f"{{sample}}-fire-{FIRE_VERSION}-pileup.bed.gz"
 )
-FIRE_PILEUP_INDEX = FIRE_PILEUP + ".tbi"
+FIRE_PILEUP_INDEX = f"{FIRE_PILEUP}.tbi"
 FIRE_BIGWIG = (
     f"results/fire/bigwigs/"
     f"{{sample}}-fire-{FIRE_VERSION}-pileup_shrunk.bw"
 )
+FIRE_H1_BIGWIG = (
+    f"results/fire/haplotypes/tracks/"
+    f"{{sample}}-fire-{FIRE_VERSION}-H1-percent-accessible.bw"
+)
+FIRE_H2_BIGWIG = (
+    f"results/fire/haplotypes/tracks/"
+    f"{{sample}}-fire-{FIRE_VERSION}-H2-percent-accessible.bw"
+)
+FIRE_HAPLOTYPE_DIFFERENCE_BIGWIG = (
+    f"results/fire/haplotypes/tracks/"
+    f"{{sample}}-fire-{FIRE_VERSION}-H1-minus-H2-percent-accessible.bw"
+)
+FIRE_HAPLOTYPE_DIFFERENCES = (
+    f"results/fire/haplotypes/differences/"
+    f"{{sample}}-fire-{FIRE_VERSION}-haplotype-differences.bed.gz"
+)
+FIRE_HAPLOTYPE_DIFFERENCES_INDEX = f"{FIRE_HAPLOTYPE_DIFFERENCES}.tbi"
+FIRE_HAPLOTYPE_SUMMARY = (
+    f"results/fire/haplotypes/differences/"
+    f"{{sample}}-fire-{FIRE_VERSION}-haplotype-differences-summary.tsv"
+)
 FIRE_ELIGIBILITY = "intermediate/fire/eligibility.json"
 FIRE_ELIGIBILITY_REPORT = "results/fire/eligibility.tsv"
-FIRE_PILEUP_STAGE = "intermediate/fire/pileups"
 PBWGS_OUTPUTS = "pbWGS/{sample}/outputs.json"
 HAPLOTAGGED_BAM = (
     "results/wgs/{sample}/{sample}.GRCh38.haplotagged.bam"
 )
+HAPLOTAGGED_BAM_INDEX = f"{HAPLOTAGGED_BAM}.bai"
 HLA_JSON = "results/hla/{sample}_hifihla_report.json"
 HLA_REPORT = "results/hla/{sample}_hifihla_report.tsv"
 HLA_SUMMARY = "results/hla/{sample}_hifihla_summary.tsv"
@@ -234,6 +272,62 @@ if len(svtopo_prefixes) != len(set(svtopo_prefixes)):
 FIRE_CANDIDATES = [sample for sample in SAMPLES if uses_fiberseq(sample)]
 
 
+def load_fire_chromosomes():
+    if not FIRE_CANDIDATES:
+        return []
+    reference_index = Path(f"{FIRE_REF}.fai")
+    if not reference_index.is_file():
+        raise ValueError(f"FIRE reference index does not exist: {reference_index}")
+    try:
+        keep_pattern = re.compile(FIRE_KEEP_CHROMOSOMES)
+    except re.error as error:
+        raise ValueError(
+            f"invalid fire_keep_chromosomes pattern: {FIRE_KEEP_CHROMOSOMES!r}"
+        ) from error
+
+    chromosomes = []
+    with reference_index.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) < 2:
+                raise ValueError(
+                    f"{reference_index}:{line_number}: malformed FASTA index"
+                )
+            chromosome = fields[0]
+            try:
+                length = int(fields[1])
+            except ValueError as error:
+                raise ValueError(
+                    f"{reference_index}:{line_number}: invalid contig length"
+                ) from error
+            if "/" in chromosome:
+                raise ValueError(
+                    f"{reference_index}:{line_number}: contig contains '/': "
+                    f"{chromosome}"
+                )
+            if length < FIRE_MIN_CONTIG_LENGTH:
+                continue
+            if "chrUn_" in chromosome or "_random" in chromosome:
+                continue
+            if keep_pattern.fullmatch(chromosome):
+                chromosomes.append(chromosome)
+
+    chromosomes.sort()
+    if not chromosomes:
+        raise ValueError(
+            "no FIRE chromosomes remain after applying contig filters"
+        )
+    return chromosomes
+
+
+FIRE_CHROMS = load_fire_chromosomes()
+FIRE_CHROM_PATTERN = (
+    "(?:" + "|".join(map(re.escape, FIRE_CHROMS)) + ")"
+    if FIRE_CHROMS
+    else r"(?!)"
+)
+
+
 def fire_eligibility_checkpoint(wildcards):
     return checkpoints.fire_eligibility.get()
 
@@ -244,21 +338,16 @@ def eligible_fire_samples(wildcards):
         return json.load(handle)["eligible_samples"]
 
 
-def eligible_fire_bams(wildcards):
-    return expand(HAPLOTAGGED_BAM, sample=eligible_fire_samples(wildcards))
+def eligible_fire_bam(wildcards):
+    if wildcards.sample not in eligible_fire_samples(wildcards):
+        raise ValueError(
+            f"{wildcards.sample}: FIRE requires mean depth >= "
+            f"{FIRE_MIN_MEAN_DEPTH:g}"
+        )
+    return HAPLOTAGGED_BAM.format(sample=wildcards.sample)
 
 
-def fire_eligibility_manifest(wildcards):
-    return fire_eligibility_checkpoint(wildcards).output.manifest
-
-
-def completed_fire_pileup(wildcards):
-    checkpoint_output = checkpoints.fire.get()
-    filename = f"{wildcards.sample}-fire-{FIRE_VERSION}-pileup.bed.gz"
-    return os.path.join(str(checkpoint_output.output.pileups), filename)
-
-
-def fire_targets(wildcards):
+def fire_core_targets(wildcards):
     checkpoint_output = fire_eligibility_checkpoint(wildcards)
     samples = eligible_fire_samples(wildcards)
     return (
@@ -266,6 +355,19 @@ def fire_targets(wildcards):
         + expand(FIRE_PILEUP, sample=samples)
         + expand(FIRE_PILEUP_INDEX, sample=samples)
         + expand(FIRE_BIGWIG, sample=samples)
+        + expand(FIRE_H1_BIGWIG, sample=samples)
+        + expand(FIRE_H2_BIGWIG, sample=samples)
+        + expand(FIRE_HAPLOTYPE_DIFFERENCE_BIGWIG, sample=samples)
+        + expand(FIRE_HAPLOTYPE_DIFFERENCES, sample=samples)
+        + expand(FIRE_HAPLOTYPE_DIFFERENCES_INDEX, sample=samples)
+        + expand(FIRE_HAPLOTYPE_SUMMARY, sample=samples)
+    )
+
+
+def fire_targets(wildcards):
+    samples = eligible_fire_samples(wildcards)
+    return (
+        fire_core_targets(wildcards)
         + expand(
             "results/fire/ccre/{peak_set}/{sample}_scATAC_max_scores.bed",
             sample=samples,
@@ -299,9 +401,15 @@ shell.prefix("set -euo pipefail; ")
 
 wildcard_constraints:
     sample="[A-Za-z0-9][A-Za-z0-9._-]*",
-    peak_set="[A-Za-z0-9][A-Za-z0-9._-]*"
+    peak_set="[A-Za-z0-9][A-Za-z0-9._-]*",
+    fire_chrom=FIRE_CHROM_PATTERN
 
-localrules: all, wdl_input, hifi_wgs, fire_eligibility, fire_config, fire
+localrules: all, fire_only, wdl_input, hifi_wgs, fire_eligibility
+
+
+rule fire_only:
+    input:
+        fire_core_targets
 
 
 rule all:
@@ -494,7 +602,7 @@ rule haplotagged_bam_index:
     input:
         HAPLOTAGGED_BAM
     output:
-        HAPLOTAGGED_BAM + ".bai"
+        HAPLOTAGGED_BAM_INDEX
     threads: 8
     resources:
         mem_mb=16000,
@@ -514,122 +622,13 @@ rule haplotagged_bam_index:
         """
 
 
-rule fire_config:
-    input:
-        eligibility=fire_eligibility_manifest,
-        bams=eligible_fire_bams,
-        reference=FIRE_REF,
-        pixi=FIRE_PIXI
-    output:
-        table="fibertools/FIRE/config.tbl",
-        config="fibertools/FIRE/config.yaml"
-    run:
-        Path(output.table).parent.mkdir(parents=True, exist_ok=True)
-        with open(input.eligibility, encoding="utf-8") as eligibility_handle:
-            fire_samples = json.load(eligibility_handle)["eligible_samples"]
-        if len(fire_samples) != len(input.bams):
-            raise ValueError("FIRE eligibility and BAM inputs are inconsistent")
-        with open(output.table, "w", encoding="utf-8") as table_handle:
-            table_handle.write("sample\tbam\n")
-            for sample, bam_path in zip(fire_samples, input.bams):
-                table_handle.write(
-                    f"{sample}\t{Path(str(bam_path)).resolve()}\n"
-                )
-
-        fire_config = {
-            "ref": str(Path(input.reference).resolve()),
-            "ref_name": "hg38",
-            "manifest": str(Path(output.table).resolve()),
-            "full-version": True,
-        }
-        with open(output.config, "w", encoding="utf-8") as config_handle:
-            yaml.safe_dump(fire_config, config_handle, sort_keys=False)
-
-
-checkpoint fire:
-    input:
-        table="fibertools/FIRE/config.tbl",
-        config="fibertools/FIRE/config.yaml",
-        pixi=FIRE_PIXI
-    output:
-        pileups=directory(FIRE_PILEUP_STAGE)
-    threads: 1
-    resources:
-        mem_mb=4000,
-        runtime=10080,
-        fire_driver=1
-    params:
-        executable=PIXI
-    log:
-        "logs/fire/fire.log"
-    benchmark:
-        "benchmarks/fire.tsv"
-    shell:
-        """
-        mkdir -p "$(dirname {log:q})" {output.pileups:q}
-        (
-            cd fibertools/FIRE
-            targets=()
-            while IFS=$'\t' read -r sample _; do
-                targets+=(
-                    "results/$sample/$sample-fire-{FIRE_VERSION}-pileup.bed.gz"
-                )
-            done < <(tail -n +2 config.tbl)
-            {params.executable:q} run \
-                --manifest-path {input.pixi:q} \
-                slurm --configfile config.yaml --keep-going \
-                "${{targets[@]}}"
-        ) > {log:q} 2>&1
-        (
-            IFS= read -r _
-            while IFS=$'\t' read -r sample _; do
-                source="fibertools/FIRE/results/$sample/$sample-fire-{FIRE_VERSION}-pileup.bed.gz"
-                target="{output.pileups}/$sample-fire-{FIRE_VERSION}-pileup.bed.gz"
-                test -s "$source"
-                test -s "$source.tbi"
-                if ! [[ "$source" -ef "$target" ]]; then
-                    ln -f "$source" "$target"
-                fi
-                if ! [[ "$source.tbi" -ef "$target.tbi" ]]; then
-                    ln -f "$source.tbi" "$target.tbi"
-                fi
-            done
-        ) < fibertools/FIRE/config.tbl >> {log:q} 2>&1
-        """
-
-
-rule publish_fire_pileup:
-    input:
-        pileup=completed_fire_pileup,
-        index=lambda wildcards: completed_fire_pileup(wildcards) + ".tbi"
-    output:
-        pileup=FIRE_PILEUP,
-        index=FIRE_PILEUP_INDEX
-    threads: 1
-    resources:
-        mem_mb=4000,
-        runtime=30,
-        io_heavy=1
-    log:
-        "logs/publish_fire_pileup/{sample}.log"
-    benchmark:
-        "benchmarks/publish_fire_pileup/{sample}.tsv"
-    shell:
-        """
-        mkdir -p "$(dirname {output.pileup:q})" "$(dirname {log:q})"
-        (
-            cp {input.pileup:q} {output.pileup:q}
-            cp {input.index:q} {output.index:q}
-        ) > {log:q} 2>&1
-        test -s {output.pileup:q}
-        test -s {output.index:q}
-        """
+include: "workflow/rules/fire.smk"
 
 
 rule fire_bigwig:
     input:
-        pileup=completed_fire_pileup,
-        index=lambda wildcards: completed_fire_pileup(wildcards) + ".tbi",
+        pileup=FIRE_PILEUP,
+        index=FIRE_PILEUP_INDEX,
         chrom_sizes=CHROM_SIZES,
         shrink_tool=SHRINK_FIRE_BED
     output:
@@ -670,8 +669,8 @@ rule fire_bigwig:
 rule scatac_map:
     input:
         peaks=lambda wildcards: CCRE_PEAKS[wildcards.peak_set],
-        pileup=completed_fire_pileup,
-        pileup_index=lambda wildcards: completed_fire_pileup(wildcards) + ".tbi",
+        pileup=FIRE_PILEUP,
+        pileup_index=FIRE_PILEUP_INDEX,
         chrom_sizes=CHROM_SIZES
     output:
         temp("intermediate/fire/ccre/{peak_set}/{sample}.mapped.bed")

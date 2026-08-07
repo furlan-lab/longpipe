@@ -5,13 +5,14 @@ includes:
 
 1. optional Fiber-seq nucleosome annotation;
 2. PacBio HiFi human WGS WDL through MiniWDL;
-3. FIRE, bigWig generation, and cCRE aggregation for Hia5 samples;
+3. FIRE, haplotype accessibility tracks and tests, and cCRE aggregation for
+   Hia5 samples;
 4. Sawfish structural-variant calling and SVTopo extraction;
 5. HiFiHLA from phased contigs or aligned reads.
 
-The top-level Snakemake process stays attached on the submit host. MiniWDL and
-FIRE are nested workflow drivers, while the remaining rules are submitted by
-Snakemake's SLURM executor.
+The top-level Snakemake process stays attached on the submit host. MiniWDL is
+the only nested workflow driver. FIRE pileup generation and the remaining
+rules are submitted directly by Snakemake's SLURM executor.
 
 ## Installation
 
@@ -58,10 +59,21 @@ bedtools, pbtk, Sawfish, and SVTopo. A working `conda` executable must
 therefore be available on the submit and compute nodes, but no Longpipe Conda
 environment needs to be activated.
 
-MiniWDL and FIRE remain externally managed because both require site scheduler
-configuration. The `copy_pbWDL` and `shrink_fire_bed` executables from
-pacbiowdlR are also installed outside the per-rule Conda environments. Set
-their executable and resource paths in each run's `config.yaml`.
+MiniWDL remains externally managed because it requires site scheduler
+configuration. FIRE's pileup-producing DAG is maintained in Longpipe and uses
+the pinned per-rule environments in `envs/fire-core.yaml` and
+`envs/fire-python.yaml`; users do not install or run a shared FIRE Pixi
+environment. The `copy_pbWDL` and `shrink_fire_bed` executables from
+pacbiowdlR remain external. Set their executable and resource paths in each
+run's `config.yaml`.
+
+The native FIRE rules reproduce the pileup path from upstream FIRE commit
+`e7f2aae1f59bbb74c46e1f27936da380cb074704` (`v0.1.2`). Vendored FIRE code is
+covered by `workflow/fire/LICENSE`. `fire_exclude_regions` must list the gap,
+blacklist, and segmental-duplication BED inputs used by that release.
+Existing run configurations must remove `fire_pixi` and `pixi_executable`,
+then add `fire_upstream_commit` and `fire_exclude_regions` as shown in
+`config/config.yaml` before testing this branch.
 
 The Furlan Lab MiniWDL deployment files are in `deploy/miniwdl/`. Its wrapper
 uses a shared engine and site configuration while keeping call and Singularity
@@ -143,6 +155,31 @@ to `8.0`. This is a mean-depth prefilter; FIRE's own coverage checks
 still apply. Decisions and skipped samples are recorded in
 `run-metadata/fire-eligibility.tsv`.
 
+FIRE's filtering and coverage defaults are explicit in `config.yaml`. Keep
+`fire_upstream_commit` and `fire_version` pinned unless the native rules and
+parity tests are updated together. To compare an old nested-FIRE result with a
+native result while testing this branch, compare decompressed content:
+
+```bash
+python workflow/scripts/compare_fire_pileups.py \
+  /path/to/legacy-pileup.bed.gz \
+  /path/to/native-pileup.bed.gz
+```
+
+The final pileup includes haplotype-specific coverage and FIRE coverage from
+`ft pileup --haps`. Longpipe converts those columns into H1 and H2 percent
+accessible bigWigs plus an H1-minus-H2 percentage-point bigWig. It also tests
+confident FIRE local maxima for a haplotype accessibility difference using a
+two-sided Fisher exact test on accessible versus inaccessible fibers and
+Benjamini-Hochberg correction across tested loci. The thresholds are controlled
+by `fire_haplotype_min_coverage`, `fire_haplotype_max_fdr`, and
+`fire_haplotype_qvalue`.
+
+This is a phased H1-versus-H2 analysis, not a cCRE aggregation. H1 and H2 are
+phase labels and are not automatically maternal and paternal. Their direction
+can switch between unoriented phase blocks, and unphased fibers do not
+contribute to either haplotype-specific denominator.
+
 The runsheet requires:
 
 | Column | Meaning |
@@ -173,6 +210,18 @@ Launch from the working directory containing the named run:
 ```bash
 longpipe run 260410_BT-brain
 ```
+
+Run only FIRE and its required upstream dependencies with:
+
+```bash
+longpipe run 260410_BT-brain --only-fire
+```
+
+This target skips cCRE aggregation, Sawfish, SVTopo, and HiFiHLA. If the
+nucleosome-annotated or phased WGS inputs are missing from scratch, Snakemake
+builds them because FIRE requires them. FIRE-only publication updates the
+pileup, bigWigs, and haplotype analysis while preserving already published
+PBWGS, SV, HLA, and cCRE outputs.
 
 The command remains attached until the workflow succeeds or fails. All active
 Snakemake state and intermediate files are written below:
@@ -210,6 +259,9 @@ After a successful workflow, Longpipe stages and publishes:
 │   │   ├── fire/
 │   │   │   ├── pileups/
 │   │   │   ├── bigwigs/
+│   │   │   ├── haplotypes/
+│   │   │   │   ├── tracks/
+│   │   │   │   └── differences/
 │   │   │   └── ccre/
 │   │   │       ├── encode/
 │   │   │       └── brain/
@@ -226,11 +278,15 @@ After a successful workflow, Longpipe stages and publishes:
 
 The `fire/` directory is present only for samples that enter the Fiber-seq
 branch and pass the configured mean-depth threshold. Published FIRE pileups
-include their Tabix `.tbi` indexes. Scratch paths retain the workflow's
-internal `results/{wgs,fire,sv,hla}` layout so existing work can resume;
-Longpipe performs the per-sample transformation only when publishing a
-successful run. A successful publication removes the superseded durable
-`results/` tree from older Longpipe versions.
+and haplotype-difference tables include their Tabix `.tbi` indexes. The
+haplotype difference table contains H1/H2 coverage, percent accessibility,
+percentage-point difference, odds ratio, raw p-value, adjusted q-value, and a
+significance flag; its companion summary records filtering and test counts.
+Scratch paths retain the workflow's internal `results/{wgs,fire,sv,hla}`
+layout so existing work can resume; Longpipe performs the per-sample
+transformation only when publishing a successful run. A successful full
+publication removes the superseded durable `results/` tree from older Longpipe
+versions.
 
 `run-metadata/` contains the latest status and versioned invocation records
 with the exact configuration, runsheet, and selected Snakemake metadata used
@@ -252,10 +308,11 @@ This never removes durable configuration or published results.
 
 Rules request total memory with `mem_mb`; the SLURM executor maps it to
 `--mem`. Cluster-specific settings live in `profiles/slurm/config.yaml`. The
-profile limits concurrent nested MiniWDL and FIRE drivers, constrains large
-copy operations, requests a GPU only for nucleosome annotation, and emits a
-SLURM efficiency report. Up to ten sample-level MiniWDL workflows run at a
-time; each `hifi_wgs` job consumes one `wdl_driver` resource unit.
+profile limits concurrent nested MiniWDL drivers, constrains large copy
+operations, requests a GPU only for nucleosome annotation, and emits a SLURM
+efficiency report. Up to ten sample-level MiniWDL workflows run at a time;
+each `hifi_wgs` job consumes one `wdl_driver` resource unit. Native FIRE jobs
+are independently scheduled and can resume at rule boundaries.
 
 The cCRE rule performs one `bedtools map` pass for max, median, and sum. With
 `scatac_sorted: true`, the cCRE BED must use the chromosome order in

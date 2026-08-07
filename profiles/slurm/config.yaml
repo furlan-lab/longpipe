@@ -18,5 +18,4 @@ default-resources:
   slurm_partition: campus-new
 resources:
   wdl_driver: 10
-  fire_driver: 1
   io_heavy: 2
