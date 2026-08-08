@@ -837,13 +837,13 @@ def _snakemake_command(
 ) -> list[str]:
     return [
         executable,
+        *targets,
         "--snakefile",
         str(workflow_root / "Snakefile"),
         "--profile",
         str(workflow_root / "profiles" / "slurm"),
         "--configfile",
         str(config_snapshot),
-        *targets,
     ]
 
 

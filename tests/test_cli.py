@@ -467,7 +467,11 @@ print("simulated workflow success")
             (run_directory / "run-metadata" / "status.json").read_text()
         )
         self.assertEqual(status["mode"], "fire_only")
-        self.assertEqual(status["command"][-1], "fire_only")
+        self.assertEqual(status["command"][1], "fire_only")
+        self.assertLess(
+            status["command"].index("fire_only"),
+            status["command"].index("--configfile"),
+        )
         self.assertEqual(status["status"], "success")
 
     def test_failure_publishes_diagnostics_but_not_results(self):
