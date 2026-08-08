@@ -323,6 +323,14 @@ class WorkflowDagTest(unittest.TestCase):
             for rule in native_rules:
                 with self.subTest(rule=rule):
                     self.assertIn(f"rule {rule}", completed.stdout)
+            for rule in (
+                "fire_shuffled_pileup_chromosome",
+                "fire_pileup_chromosome",
+            ):
+                rule_output = completed.stdout.split(f"rule {rule}:", 1)[1]
+                rule_output = rule_output.split("\n[", 1)[0]
+                with self.subTest(indexed_rule=rule):
+                    self.assertIn("filtered.cram.crai", rule_output)
             self.assertNotIn("pixi", completed.stdout.lower())
             self.assertNotIn("rule scatac_map", completed.stdout)
             self.assertNotIn("rule sawfish", completed.stdout)

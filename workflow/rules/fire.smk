@@ -377,6 +377,7 @@ rule fire_shuffled_fiber_locations_chromosome:
 rule fire_shuffled_pileup_chromosome:
     input:
         cram=rules.fire_filtered_cram.output.cram,
+        crai=rules.fire_filtered_cram.output.crai,
         shuffled=rules.fire_shuffled_fiber_locations_chromosome.output.bed
     output:
         bed=temp(FIRE_CHROMOSOME_SHUFFLED_PILEUP)
@@ -476,7 +477,8 @@ rule fire_fdr_table:
 
 rule fire_pileup_chromosome:
     input:
-        cram=rules.fire_filtered_cram.output.cram
+        cram=rules.fire_filtered_cram.output.cram,
+        crai=rules.fire_filtered_cram.output.crai
     output:
         bed=temp(FIRE_CHROMOSOME_PILEUP)
     threads: 4
