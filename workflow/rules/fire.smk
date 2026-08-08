@@ -69,7 +69,7 @@ FIRE_CHROMOSOME_FDR_TRACK = (
 rule fire_filtered_cram:
     input:
         bam=eligible_fire_bam,
-        bai=HAPLOTAGGED_BAM_INDEX,
+        bai=FIRE_INPUT_BAM_INDEX,
         reference=FIRE_REF,
         reference_index=f"{FIRE_REF}.fai"
     output:

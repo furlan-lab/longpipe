@@ -145,6 +145,19 @@ properties:
     type: string
     minLength: 1
     default: miniwdl
+  ft_predict_executable:
+    type: string
+    minLength: 1
+    default: ft
+  fiberseq_detection_reads:
+    type: integer
+    minimum: 1
+    default: 5000
+  fiberseq_detection_min_fraction:
+    type: number
+    exclusiveMinimum: 0
+    maximum: 1
+    default: 0.5
   copy_pbwdl_tool:
     type: string
     minLength: 1

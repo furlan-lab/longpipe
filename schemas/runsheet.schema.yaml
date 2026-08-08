@@ -22,6 +22,34 @@ properties:
     type: string
   hifi_bam:
     type: string
+  input_stage:
+    type: string
+    enum:
+      - ""
+      - raw
+      - RAW
+      - Raw
+      - aligned
+      - ALIGNED
+      - Aligned
+      - pbwgs
+      - PBWGS
+  pbwgs_outputs_json:
+    type: string
+  fiberseq_input:
+    type: string
+    enum:
+      - ""
+      - auto
+      - AUTO
+      - Auto
+      - m6a
+      - M6A
+      - kinetics
+      - KINETICS
+      - Kinetics
+  notes:
+    type: string
   sex:
     type: string
     enum: ["", M, m, MALE, male, F, f, FEMALE, female]

@@ -1,3 +1,3 @@
-core_name,lab_name,run,cell,barcode,hifi_bam,sex,hia5
-BT53,Brain_1,r84265_20260410_231712,1_A01,bc2081,,F,yes
-BT54,,r84265_20260410_231712,1_B01,bc2082,,M,no
+core_name,lab_name,run,cell,barcode,hifi_bam,input_stage,pbwgs_outputs_json,sex,hia5,fiberseq_input,notes
+BT53,Brain_1,r84265_20260410_231712,1_A01,bc2081,,raw,,F,yes,auto,
+BT54,,r84265_20260410_231712,1_B01,bc2082,,raw,,M,no,,

@@ -84,6 +84,29 @@ fire_samples = [
     for sample, row in zip(samples, rows)
     if row["hia5"].strip().lower() in {"yes", "y", "true", "t", "1"}
 ]
+reanalysis_validation = (
+    scratch / "intermediate" / "reanalysis" / "input-validation"
+)
+reanalysis_validation.mkdir(parents=True, exist_ok=True)
+for sample, row in zip(samples, rows):
+    input_stage = row.get("input_stage", "").strip().lower()
+    if input_stage in {"aligned", "pbwgs"}:
+        (reanalysis_validation / f"{sample}.json").write_text(json.dumps({
+            "sample": sample,
+            "input_stage": input_stage,
+            "validation": "passed",
+        }))
+fiberseq_detection = (
+    scratch / "intermediate" / "fiberseq" / "input-detection"
+)
+fiberseq_detection.mkdir(parents=True, exist_ok=True)
+for sample in fire_samples:
+    (fiberseq_detection / f"{sample}.json").write_text(json.dumps({
+        "sample": sample,
+        "requested_mode": "auto",
+        "selected_action": "use_existing",
+        "decision_reason": "m6a_and_footprints_detected",
+    }))
 
 fire = results / "fire"
 fire.mkdir(parents=True, exist_ok=True)
@@ -371,6 +394,14 @@ print("simulated workflow success")
         self.assertTrue(
             (run_directory / "run-metadata" / "fire-eligibility.tsv").is_file()
         )
+        self.assertTrue(
+            (
+                run_directory
+                / "run-metadata"
+                / "fiberseq-input"
+                / f"{sample}.json"
+            ).is_file()
+        )
         self.assertFalse((run_directory / "results").exists())
         self.assertTrue((run_directory / "logs" / "rules" / "fake.log").is_file())
         self.assertTrue((run_directory / "benchmarks" / "fake.tsv").is_file())
@@ -393,6 +424,9 @@ print("simulated workflow success")
             self.assertTrue((invocation / "config.yaml").is_file())
             self.assertTrue((invocation / "runsheet.csv").is_file())
             self.assertTrue((invocation / "status.json").is_file())
+            self.assertTrue(
+                (invocation / "fiberseq-input" / f"{sample}.json").is_file()
+            )
 
         with working_directory(self.work_one):
             result, _, error = self.invoke(arguments + ["--restart"])
@@ -474,6 +508,39 @@ print("simulated workflow success")
         )
         self.assertEqual(status["status"], "success")
 
+    def test_reanalysis_validation_metadata_is_published(self):
+        run_directory = self.setup_run(self.work_one, "reanalysis-run")
+        runsheet = run_directory / "runsheet.csv"
+        runsheet.write_text(
+            runsheet.read_text().replace(
+                "BT53,Brain_1,r84265_20260410_231712,1_A01,bc2081,,raw,,",
+                "BT53,Brain_1,r84265_20260410_231712,1_A01,bc2081,"
+                "/path/to/aligned.bam,aligned,,",
+            )
+        )
+
+        with working_directory(self.work_one):
+            result, _, error = self.invoke(
+                self.run_arguments("reanalysis-run")
+            )
+
+        self.assertEqual(result, 0, error)
+        report = (
+            run_directory
+            / "run-metadata"
+            / "reanalysis-input"
+            / "Brain_1.json"
+        )
+        self.assertEqual(
+            json.loads(report.read_text())["input_stage"], "aligned"
+        )
+        invocations = sorted(
+            (run_directory / "run-metadata" / "invocations").iterdir()
+        )
+        self.assertTrue(
+            (invocations[-1] / "reanalysis-input" / "Brain_1.json").is_file()
+        )
+
     def test_failure_publishes_diagnostics_but_not_results(self):
         run_directory = self.setup_run(self.work_one, "failed-run")
         with working_directory(self.work_one), environment(
@@ -485,6 +552,14 @@ print("simulated workflow success")
         self.assertIn("Run failed with exit code 7", error)
         self.assertFalse((run_directory / "samples").exists())
         self.assertTrue((run_directory / "logs" / "rules" / "fake.log").is_file())
+        self.assertTrue(
+            (
+                run_directory
+                / "run-metadata"
+                / "fiberseq-input"
+                / "Brain_1.json"
+            ).is_file()
+        )
         status = json.loads(
             (run_directory / "run-metadata" / "status.json").read_text()
         )
@@ -510,6 +585,14 @@ print("simulated workflow success")
         self.assertEqual(result, 0, error)
         self.assertFalse((run_directory / "samples" / "Brain_1" / "fire").exists())
         self.assertFalse((run_directory / "samples" / "BT54").exists())
+        self.assertFalse(
+            (
+                run_directory
+                / "run-metadata"
+                / "fiberseq-input"
+                / "Brain_1.json"
+            ).exists()
+        )
         self.assertTrue(
             (
                 self.scratch

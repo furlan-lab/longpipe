@@ -96,6 +96,11 @@ EXPECTED_CN = {
 COPY_PBWDL = configured_path(config["copy_pbwdl_tool"])
 SHRINK_FIRE_BED = configured_path(config["shrink_fire_bed_tool"])
 MINIWDL = configured_executable(config["miniwdl_executable"])
+FT_PREDICT = configured_executable(config.get("ft_predict_executable", "ft"))
+FIBERSEQ_DETECTION_READS = int(config.get("fiberseq_detection_reads", 5000))
+FIBERSEQ_DETECTION_MIN_FRACTION = float(
+    config.get("fiberseq_detection_min_fraction", 0.5)
+)
 
 FIRE_PILEUP = (
     f"results/fire/pileups/"
@@ -129,11 +134,19 @@ FIRE_HAPLOTYPE_SUMMARY = (
 )
 FIRE_ELIGIBILITY = "intermediate/fire/eligibility.json"
 FIRE_ELIGIBILITY_REPORT = "results/fire/eligibility.tsv"
+FIBERSEQ_DETECTION_REPORT = (
+    "intermediate/fiberseq/input-detection/{sample}.json"
+)
+REANALYSIS_VALIDATION_REPORT = (
+    "intermediate/reanalysis/input-validation/{sample}.json"
+)
 PBWGS_OUTPUTS = "pbWGS/{sample}/outputs.json"
 HAPLOTAGGED_BAM = (
     "results/wgs/{sample}/{sample}.GRCh38.haplotagged.bam"
 )
 HAPLOTAGGED_BAM_INDEX = f"{HAPLOTAGGED_BAM}.bai"
+FIRE_INPUT_BAM = "intermediate/fire/input/{sample}.bam"
+FIRE_INPUT_BAM_INDEX = f"{FIRE_INPUT_BAM}.bai"
 HLA_JSON = "results/hla/{sample}_hifihla_report.json"
 HLA_REPORT = "results/hla/{sample}_hifihla_report.tsv"
 HLA_SUMMARY = "results/hla/{sample}_hifihla_summary.tsv"
@@ -207,6 +220,30 @@ def uses_fiberseq(sample):
     return not HIA5_GATES or is_hia5(sample)
 
 
+def input_stage_of(sample):
+    value = sample_table.loc[sample].get("input_stage", "").strip().lower()
+    if not value:
+        return "raw"
+    if value not in {"raw", "aligned", "pbwgs"}:
+        raise ValueError(
+            f"{sample}: input_stage must be raw, aligned, pbwgs, or blank; "
+            f"got {value!r}"
+        )
+    return value
+
+
+def fiberseq_input_of(sample):
+    value = sample_table.loc[sample].get("fiberseq_input", "").strip().lower()
+    if not value:
+        return "auto"
+    if value not in {"auto", "m6a", "kinetics"}:
+        raise ValueError(
+            f"{sample}: fiberseq_input must be auto, m6a, kinetics, or blank; "
+            f"got {value!r}"
+        )
+    return value
+
+
 def sex_of(sample):
     value = sample_table.loc[sample, "sex"].strip().upper()
     if not value:
@@ -219,7 +256,7 @@ def sex_of(sample):
     return aliases[value]
 
 
-def raw_hifi(sample):
+def hifi_bam(sample):
     row = sample_table.loc[sample]
     explicit_bam = row.get("hifi_bam", "").strip()
     if explicit_bam:
@@ -253,10 +290,154 @@ def raw_hifi(sample):
     return str(Path(matches[0]).resolve())
 
 
+_existing_pbwgs_cache = {}
+
+
+def existing_pbwgs(sample):
+    if sample in _existing_pbwgs_cache:
+        return _existing_pbwgs_cache[sample]
+
+    configured = sample_table.loc[sample].get("pbwgs_outputs_json", "").strip()
+    if not configured:
+        raise ValueError(
+            f"{sample}: input_stage=pbwgs requires pbwgs_outputs_json"
+        )
+    manifest = Path(configured_path(configured))
+    if not manifest.is_file():
+        raise ValueError(
+            f"{sample}: pbwgs_outputs_json does not exist: {manifest}"
+        )
+    try:
+        with manifest.open(encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(
+            f"{sample}: could not read pbwgs_outputs_json {manifest}: {error}"
+        ) from error
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"{sample}: pbwgs_outputs_json is not a JSON object: {manifest}"
+        )
+    outputs = payload.get("outputs", payload)
+    if not isinstance(outputs, dict):
+        raise ValueError(
+            f"{sample}: pbwgs_outputs_json outputs are not a JSON object: "
+            f"{manifest}"
+        )
+    bam_value = outputs.get("humanwgs_singleton.merged_haplotagged_bam")
+    if not isinstance(bam_value, str) or not bam_value:
+        raise ValueError(
+            f"{sample}: {manifest} does not contain "
+            "humanwgs_singleton.merged_haplotagged_bam"
+        )
+    bam = Path(os.path.expandvars(os.path.expanduser(bam_value)))
+    if not bam.is_absolute():
+        bam = manifest.parent / bam
+    bam = bam.resolve()
+    if not bam.is_file():
+        raise ValueError(
+            f"{sample}: reused PacBio WDL BAM does not exist: {bam}"
+        )
+    expected_name = f"{sample}.GRCh38.haplotagged.bam"
+    if bam.name != expected_name:
+        raise ValueError(
+            f"{sample}: reused PacBio WDL BAM must be named {expected_name}; "
+            f"found {bam.name}. Use the original PacBio sample label."
+        )
+
+    result = {
+        "manifest": str(manifest.resolve()),
+        "bam": str(bam),
+        "workflow_version": outputs.get("humanwgs_singleton.workflow_version"),
+    }
+    _existing_pbwgs_cache[sample] = result
+    return result
+
+
+for _sample in SAMPLES:
+    _stage = input_stage_of(_sample)
+    _row = sample_table.loc[_sample]
+    _explicit_bam = _row.get("hifi_bam", "").strip()
+    _outputs_json = _row.get("pbwgs_outputs_json", "").strip()
+    if _stage == "aligned" and not _explicit_bam:
+        raise ValueError(
+            f"{_sample}: input_stage=aligned requires an explicit hifi_bam"
+        )
+    if _stage == "pbwgs":
+        if _explicit_bam:
+            raise ValueError(
+                f"{_sample}: input_stage=pbwgs cannot also set hifi_bam"
+            )
+        existing_pbwgs(_sample)
+    elif _outputs_json:
+        raise ValueError(
+            f"{_sample}: pbwgs_outputs_json requires input_stage=pbwgs"
+        )
+
+
+def source_bam(sample):
+    if input_stage_of(sample) == "pbwgs":
+        return existing_pbwgs(sample)["bam"]
+    return hifi_bam(sample)
+
+
+def pbwgs_outputs_for_sample(sample):
+    if input_stage_of(sample) == "pbwgs":
+        return existing_pbwgs(sample)["manifest"]
+    return PBWGS_OUTPUTS.format(sample=sample)
+
+
+def reanalysis_validation_input(wildcards):
+    if input_stage_of(wildcards.sample) == "raw":
+        return []
+    return REANALYSIS_VALIDATION_REPORT.format(sample=wildcards.sample)
+
+
+def fiberseq_detection_checkpoint(wildcards):
+    return checkpoints.detect_fiberseq_input.get(sample=wildcards.sample)
+
+
 def wgs_hifi(wildcards):
-    if uses_fiberseq(wildcards.sample):
+    if input_stage_of(wildcards.sample) == "pbwgs":
+        raise ValueError(
+            f"{wildcards.sample}: reused pbWGS outputs must not enter hifi_wgs"
+        )
+    if not uses_fiberseq(wildcards.sample):
+        return hifi_bam(wildcards.sample)
+
+    checkpoint_output = fiberseq_detection_checkpoint(wildcards)
+    with open(checkpoint_output.output.report, encoding="utf-8") as handle:
+        action = json.load(handle)["selected_action"]
+    if action == "use_existing":
+        return hifi_bam(wildcards.sample)
+    if action == "add_nucleosomes":
         return f"fibertools/{wildcards.sample}.nucleosomes.bam"
-    return raw_hifi(wildcards.sample)
+    if action == "predict_m6a":
+        return f"fibertools/{wildcards.sample}.m6a_predict.bam"
+    raise ValueError(
+        f"{wildcards.sample}: unrecognized Fiber-seq input action {action!r}"
+    )
+
+
+def prepared_external_fiberseq_bam(wildcards):
+    checkpoint_output = fiberseq_detection_checkpoint(wildcards)
+    with open(checkpoint_output.output.report, encoding="utf-8") as handle:
+        action = json.load(handle)["selected_action"]
+    if action == "use_existing":
+        return source_bam(wildcards.sample)
+    if action == "add_nucleosomes":
+        return f"fibertools/{wildcards.sample}.nucleosomes.bam"
+    if action == "predict_m6a":
+        return f"fibertools/{wildcards.sample}.m6a_predict.bam"
+    raise ValueError(
+        f"{wildcards.sample}: unrecognized Fiber-seq input action {action!r}"
+    )
+
+
+def fire_source_bam(wildcards):
+    if input_stage_of(wildcards.sample) == "pbwgs":
+        return prepared_external_fiberseq_bam(wildcards)
+    return HAPLOTAGGED_BAM.format(sample=wildcards.sample)
 
 
 def svtopo_prefix(sample):
@@ -270,6 +451,17 @@ if len(svtopo_prefixes) != len(set(svtopo_prefixes)):
     )
 
 FIRE_CANDIDATES = [sample for sample in SAMPLES if uses_fiberseq(sample)]
+FIBERSEQ_DETECTION_REPORTS = expand(
+    FIBERSEQ_DETECTION_REPORT,
+    sample=FIRE_CANDIDATES,
+)
+REANALYSIS_SAMPLES = [
+    sample for sample in SAMPLES if input_stage_of(sample) != "raw"
+]
+REANALYSIS_VALIDATION_REPORTS = expand(
+    REANALYSIS_VALIDATION_REPORT,
+    sample=REANALYSIS_SAMPLES,
+)
 
 
 def load_fire_chromosomes():
@@ -344,7 +536,7 @@ def eligible_fire_bam(wildcards):
             f"{wildcards.sample}: FIRE requires mean depth >= "
             f"{FIRE_MIN_MEAN_DEPTH:g}"
         )
-    return HAPLOTAGGED_BAM.format(sample=wildcards.sample)
+    return FIRE_INPUT_BAM.format(sample=wildcards.sample)
 
 
 def fire_core_targets(wildcards):
@@ -409,26 +601,115 @@ localrules: all, fire_only, wdl_input, hifi_wgs, fire_eligibility
 
 rule fire_only:
     input:
-        fire_core_targets
+        reanalysis_validation=REANALYSIS_VALIDATION_REPORTS,
+        fiberseq_detection=FIBERSEQ_DETECTION_REPORTS,
+        fire=fire_core_targets
 
 
 rule all:
+    default_target: True
     input:
+        reanalysis_validation=REANALYSIS_VALIDATION_REPORTS,
+        fiberseq_detection=FIBERSEQ_DETECTION_REPORTS,
         fire=fire_targets,
         sv=SV_TARGETS,
         hla=HLA_TARGETS
 
 
+rule validate_reanalysis_input:
+    input:
+        bam=lambda wildcards: source_bam(wildcards.sample),
+        reference_index=f"{FASTA}.fai"
+    output:
+        report=REANALYSIS_VALIDATION_REPORT
+    threads: 1
+    resources:
+        mem_mb=4000,
+        runtime=30
+    params:
+        stage=lambda wildcards: input_stage_of(wildcards.sample),
+        outputs_json=lambda wildcards: (
+            existing_pbwgs(wildcards.sample)["manifest"]
+            if input_stage_of(wildcards.sample) == "pbwgs"
+            else ""
+        ),
+        script=str(
+            workflow.source_path(
+                "workflow/scripts/validate_reanalysis_input.py"
+            )
+        )
+    log:
+        "logs/validate_reanalysis_input/{sample}.log"
+    benchmark:
+        "benchmarks/validate_reanalysis_input/{sample}.tsv"
+    conda:
+        "envs/fibertools.yaml"
+    shell:
+        """
+        mkdir -p "$(dirname {output.report:q})" "$(dirname {log:q})"
+        outputs_json_args=()
+        if [[ -n {params.outputs_json:q} ]]; then
+            outputs_json_args=(--outputs-json {params.outputs_json:q})
+        fi
+        python {params.script:q} \
+            --input {input.bam:q} \
+            --output {output.report:q} \
+            --reference-index {input.reference_index:q} \
+            --sample {wildcards.sample:q} \
+            --stage {params.stage:q} \
+            "${{outputs_json_args[@]}}" \
+            > {log:q} 2>&1
+        """
+
+
+checkpoint detect_fiberseq_input:
+    input:
+        bam=lambda wildcards: source_bam(wildcards.sample),
+        validation=reanalysis_validation_input
+    output:
+        report=FIBERSEQ_DETECTION_REPORT
+    threads: 1
+    resources:
+        mem_mb=4000,
+        runtime=30
+    params:
+        mode=lambda wildcards: fiberseq_input_of(wildcards.sample),
+        reads=FIBERSEQ_DETECTION_READS,
+        min_fraction=FIBERSEQ_DETECTION_MIN_FRACTION,
+        script=str(
+            workflow.source_path(
+                "workflow/scripts/detect_fiberseq_input.py"
+            )
+        )
+    log:
+        "logs/detect_fiberseq_input/{sample}.log"
+    benchmark:
+        "benchmarks/detect_fiberseq_input/{sample}.tsv"
+    conda:
+        "envs/fibertools.yaml"
+    shell:
+        """
+        mkdir -p "$(dirname {output.report:q})" "$(dirname {log:q})"
+        python {params.script:q} \
+            --input {input.bam:q} \
+            --output {output.report:q} \
+            --sample {wildcards.sample:q} \
+            --mode {params.mode:q} \
+            --reads {params.reads} \
+            --min-fraction {params.min_fraction} \
+            > {log:q} 2>&1
+        """
+
+
 rule add_nucleosomes:
     input:
-        bam=lambda wildcards: raw_hifi(wildcards.sample)
+        bam=lambda wildcards: source_bam(wildcards.sample)
     output:
         "fibertools/{sample}.nucleosomes.bam"
     threads: 16
     resources:
         mem_mb=64000,
-        runtime=240,
-        gpu=1
+        runtime=240
     log:
         "logs/add_nucleosomes/{sample}.log"
     benchmark:
@@ -439,6 +720,31 @@ rule add_nucleosomes:
         """
         mkdir -p "$(dirname {output:q})" "$(dirname {log:q})"
         ft add-nucleosomes -t {threads} {input.bam:q} > {output:q} 2> {log:q}
+        test -s {output:q}
+        """
+
+
+rule predict_m6a:
+    input:
+        bam=lambda wildcards: source_bam(wildcards.sample)
+    output:
+        "fibertools/{sample}.m6a_predict.bam"
+    threads: 30
+    resources:
+        mem_mb=128000,
+        runtime=480,
+        gpu=1
+    params:
+        executable=FT_PREDICT
+    log:
+        "logs/predict_m6a/{sample}.log"
+    benchmark:
+        "benchmarks/predict_m6a/{sample}.tsv"
+    shell:
+        """
+        mkdir -p "$(dirname {output:q})" "$(dirname {log:q})"
+        {params.executable:q} predict-m6a -t {threads} \
+            {input.bam:q} {output:q} > {log:q} 2>&1
         test -s {output:q}
         """
 
@@ -473,7 +779,8 @@ rule hifi_wgs:
     input:
         bam=wgs_hifi,
         config="pbWGS/{sample}/input.json",
-        wdl=WDL
+        wdl=WDL,
+        validation=reanalysis_validation_input
     output:
         PBWGS_OUTPUTS
     threads: 1
@@ -502,7 +809,10 @@ rule hifi_wgs:
 
 checkpoint fire_eligibility:
     input:
-        manifests=expand(PBWGS_OUTPUTS, sample=FIRE_CANDIDATES)
+        manifests=lambda wildcards: [
+            pbwgs_outputs_for_sample(sample) for sample in FIRE_CANDIDATES
+        ],
+        validation=REANALYSIS_VALIDATION_REPORTS
     output:
         manifest=FIRE_ELIGIBILITY,
         report=FIRE_ELIGIBILITY_REPORT
@@ -572,8 +882,9 @@ checkpoint fire_eligibility:
 
 rule copy_pbwdl:
     input:
-        outputs="pbWGS/{sample}/outputs.json",
-        tool=COPY_PBWDL
+        outputs=lambda wildcards: pbwgs_outputs_for_sample(wildcards.sample),
+        tool=COPY_PBWDL,
+        validation=reanalysis_validation_input
     output:
         HAPLOTAGGED_BAM
     threads: 8
@@ -595,6 +906,54 @@ rule copy_pbwdl:
             -o {params.output_directory:q} \
             -t {threads} -m > {log:q} 2>&1
         test -s {output:q}
+        """
+
+
+rule fire_input_bam:
+    input:
+        bam=fire_source_bam
+    output:
+        bam=temp(FIRE_INPUT_BAM)
+    threads: 1
+    resources:
+        mem_mb=2000,
+        runtime=10
+    log:
+        "logs/fire_input_bam/{sample}.log"
+    benchmark:
+        "benchmarks/fire_input_bam/{sample}.tsv"
+    shell:
+        """
+        mkdir -p "$(dirname {output.bam:q})" "$(dirname {log:q})"
+        source_bam="$(realpath {input.bam:q})"
+        ln -sfn "$source_bam" {output.bam:q}
+        test -s {output.bam:q}
+        printf 'Using %s\n' "$source_bam" > {log:q}
+        """
+
+
+rule fire_input_bam_index:
+    input:
+        bam=FIRE_INPUT_BAM
+    output:
+        bai=temp(FIRE_INPUT_BAM_INDEX)
+    threads: 8
+    resources:
+        mem_mb=16000,
+        runtime=60,
+        io_heavy=1
+    log:
+        "logs/fire_input_bam_index/{sample}.log"
+    benchmark:
+        "benchmarks/fire_input_bam_index/{sample}.tsv"
+    conda:
+        "envs/hifihla.yaml"
+    shell:
+        """
+        mkdir -p "$(dirname {log:q})"
+        samtools index -@ {threads} -o {output.bai:q} {input.bam:q} \
+            > {log:q} 2>&1
+        test -s {output.bai:q}
         """
 
 

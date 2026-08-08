@@ -16,6 +16,71 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSchemaTest(unittest.TestCase):
+    def test_runsheet_accepts_free_text_notes(self):
+        from jsonschema import Draft202012Validator
+
+        schema = yaml.safe_load(
+            (REPOSITORY_ROOT / "schemas" / "runsheet.schema.yaml").read_text()
+        )
+        validator = Draft202012Validator(schema["properties"]["notes"])
+
+        self.assertFalse(list(validator.iter_errors("healthy donor; batch 2")))
+        self.assertFalse(list(validator.iter_errors("")))
+        self.assertTrue(list(validator.iter_errors(42)))
+
+    def test_ft_predict_defaults_to_path_lookup(self):
+        schema = yaml.safe_load(
+            (REPOSITORY_ROOT / "schemas" / "config.schema.yaml").read_text()
+        )
+
+        self.assertEqual(
+            schema["properties"]["ft_predict_executable"]["default"], "ft"
+        )
+
+    def test_runsheet_accepts_explicit_fiberseq_input_types(self):
+        from jsonschema import Draft202012Validator
+
+        schema = yaml.safe_load(
+            (REPOSITORY_ROOT / "schemas" / "runsheet.schema.yaml").read_text()
+        )
+        validator = Draft202012Validator(
+            schema["properties"]["fiberseq_input"]
+        )
+
+        self.assertFalse(list(validator.iter_errors("m6a")))
+        self.assertFalse(list(validator.iter_errors("kinetics")))
+        self.assertFalse(list(validator.iter_errors("auto")))
+        self.assertFalse(list(validator.iter_errors("")))
+        self.assertTrue(list(validator.iter_errors("unknown")))
+
+    def test_runsheet_accepts_explicit_input_stages(self):
+        from jsonschema import Draft202012Validator
+
+        schema = yaml.safe_load(
+            (REPOSITORY_ROOT / "schemas" / "runsheet.schema.yaml").read_text()
+        )
+        validator = Draft202012Validator(schema["properties"]["input_stage"])
+
+        for value in ("", "raw", "aligned", "pbwgs", "PBWGS"):
+            with self.subTest(value=value):
+                self.assertFalse(list(validator.iter_errors(value)))
+        self.assertTrue(list(validator.iter_errors("unknown")))
+
+    def test_fiberseq_detection_defaults_match_ft_validate(self):
+        schema = yaml.safe_load(
+            (REPOSITORY_ROOT / "schemas" / "config.schema.yaml").read_text()
+        )
+        properties = schema["properties"]
+
+        self.assertEqual(
+            properties["fiberseq_detection_reads"]["default"],
+            5000,
+        )
+        self.assertEqual(
+            properties["fiberseq_detection_min_fraction"]["default"],
+            0.5,
+        )
+
     def test_fire_minimum_mean_depth_defaults_to_eight(self):
         schema = yaml.safe_load(
             (REPOSITORY_ROOT / "schemas" / "config.schema.yaml").read_text()
@@ -226,6 +291,292 @@ class FirePileupComparisonTest(unittest.TestCase):
             self.assertIn("identical after decompression", completed.stdout)
 
 
+class FiberseqInputDetectionTest(unittest.TestCase):
+    def test_auto_selects_each_supported_action(self):
+        cases = {
+            "m6a": (
+                ["MM:Z:A+a,0;", "ML:B:C,200"],
+                "add_nucleosomes",
+            ),
+            "m6a_with_retained_kinetics": (
+                [
+                    "MM:Z:A+a,0;",
+                    "ML:B:C,200",
+                    "fi:B:C,1,1,1,1",
+                    "ri:B:C,1,1,1,1",
+                    "fp:B:C,1,1,1,1",
+                    "rp:B:C,1,1,1,1",
+                ],
+                "add_nucleosomes",
+            ),
+            "complete": (
+                [
+                    "MM:Z:A+a,0;",
+                    "ML:B:C,200",
+                    "ns:B:I,0",
+                    "nl:B:I,100",
+                    "as:B:I,100",
+                    "al:B:I,50",
+                ],
+                "use_existing",
+            ),
+            "complete_ma": (
+                [
+                    "MM:Z:A+a,0;",
+                    "ML:B:C,200",
+                    "MA:Z:4;nuc+:1-2;msp+:3-2",
+                ],
+                "use_existing",
+            ),
+            "unrelated_ma": (
+                [
+                    "MM:Z:A+a,0;",
+                    "ML:B:C,200",
+                    "MA:Z:4;ctcf+:1-2",
+                ],
+                "add_nucleosomes",
+            ),
+            "kinetics": (
+                [
+                    "fi:B:C,1,1,1,1",
+                    "ri:B:C,1,1,1,1",
+                    "fp:B:C,1,1,1,1",
+                    "rp:B:C,1,1,1,1",
+                ],
+                "predict_m6a",
+            ),
+            "cpg_with_kinetics": (
+                [
+                    "MM:Z:C+m,0;",
+                    "ML:B:C,200",
+                    "fi:B:C,1,1,1,1",
+                    "ri:B:C,1,1,1,1",
+                    "fp:B:C,1,1,1,1",
+                    "rp:B:C,1,1,1,1",
+                ],
+                "predict_m6a",
+            ),
+        }
+        for name, (tags, expected) in cases.items():
+            with self.subTest(name=name):
+                completed, report = self._detect(tags)
+                self.assertEqual(completed.returncode, 0, completed.stdout)
+                self.assertEqual(report["selected_action"], expected)
+                self.assertEqual(report["reads_tested"], 1)
+
+    def test_ma_detection_requires_both_nucleosome_and_msp_types(self):
+        completed, report = self._detect(
+            [
+                "MM:Z:A+a,0;",
+                "ML:B:C,200",
+                "MA:Z:4;nuc+:1-2",
+            ]
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stdout)
+        self.assertEqual(report["selected_action"], "add_nucleosomes")
+        self.assertEqual(report["ma_annotation_reads"], 0)
+
+    def test_auto_rejects_bam_without_m6a_or_kinetics(self):
+        completed, report = self._detect(["rq:f:0.999"])
+
+        self.assertEqual(completed.returncode, 2, completed.stdout)
+        self.assertIsNone(report)
+        self.assertIn("neither sufficient A+a MM/ML", completed.stdout)
+
+    def test_explicit_override_still_validates_required_tags(self):
+        completed, report = self._detect(
+            ["MM:Z:A+a,0;", "ML:B:C,200"],
+            mode="kinetics",
+        )
+
+        self.assertEqual(completed.returncode, 2, completed.stdout)
+        self.assertIsNone(report)
+        self.assertIn("requires fi, ri, fp, and rp", completed.stdout)
+
+    def _detect(
+        self,
+        tags: list[str],
+        mode: str = "auto",
+    ) -> tuple[subprocess.CompletedProcess[str], dict | None]:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            alignments = root / "sample.sam"
+            alignment = "\t".join(
+                [
+                    "read1",
+                    "4",
+                    "*",
+                    "0",
+                    "0",
+                    "*",
+                    "*",
+                    "0",
+                    "0",
+                    "AAAA",
+                    "IIII",
+                    *tags,
+                ]
+            )
+            alignments.write_text(f"{alignment}\n", encoding="utf-8")
+            fake_samtools = root / "samtools"
+            fake_samtools.write_text(
+                "#!/usr/bin/env python3\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "sys.stdout.write(Path(sys.argv[-1]).read_text())\n",
+                encoding="utf-8",
+            )
+            fake_samtools.chmod(0o755)
+            output = root / "detection.json"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(
+                        REPOSITORY_ROOT
+                        / "workflow"
+                        / "scripts"
+                        / "detect_fiberseq_input.py"
+                    ),
+                    "--input",
+                    str(alignments),
+                    "--output",
+                    str(output),
+                    "--sample",
+                    "sample",
+                    "--mode",
+                    mode,
+                    "--samtools",
+                    str(fake_samtools),
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            report = json.loads(output.read_text()) if output.is_file() else None
+            return completed, report
+
+
+class ReanalysisInputValidationTest(unittest.TestCase):
+    def test_valid_pbwgs_bam_records_version_and_action(self):
+        completed, report = self._validate("pbwgs")
+
+        self.assertEqual(completed.returncode, 0, completed.stdout)
+        self.assertEqual(report["source_workflow_version"], "v2.0.7")
+        self.assertEqual(report["action"], "reuse_pbwgs_outputs")
+        self.assertTrue(report["reference_dictionary_matches"])
+        self.assertEqual(report["sampled_records"]["mapped_primary"], 1)
+
+    def test_aligned_bam_is_marked_for_current_wdl_realign(self):
+        completed, report = self._validate("aligned")
+
+        self.assertEqual(completed.returncode, 0, completed.stdout)
+        self.assertIsNone(report["source_workflow_version"])
+        self.assertEqual(report["action"], "realign_with_current_pbwgs")
+
+    def test_reference_dictionary_mismatch_fails(self):
+        completed, report = self._validate("aligned", reference_length=99)
+
+        self.assertEqual(completed.returncode, 2, completed.stdout)
+        self.assertIsNone(report)
+        self.assertIn("reference dictionary does not match", completed.stdout)
+
+    def test_reference_dictionary_order_mismatch_fails(self):
+        completed, report = self._validate(
+            "aligned",
+            reference_contigs=(("chr2", 200), ("chr1", 100)),
+        )
+
+        self.assertEqual(completed.returncode, 2, completed.stdout)
+        self.assertIsNone(report)
+        self.assertIn("order_mismatch=True", completed.stdout)
+
+    def _validate(
+        self,
+        stage: str,
+        reference_length: int = 100,
+        reference_contigs: tuple[tuple[str, int], ...] | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], dict | None]:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bam = root / "sample.GRCh38.haplotagged.bam"
+            bam.touch()
+            reference_index = root / "ref.fa.fai"
+            if reference_contigs is None:
+                reference_contigs = (
+                    ("chr1", reference_length),
+                    ("chr2", 200),
+                )
+            reference_index.write_text(
+                "".join(
+                    f"{name}\t{length}\t0\t80\t81\n"
+                    for name, length in reference_contigs
+                ),
+                encoding="utf-8",
+            )
+            outputs = root / "outputs.json"
+            outputs.write_text(
+                json.dumps(
+                    {
+                        "humanwgs_singleton.workflow_version": "v2.0.7",
+                        "humanwgs_singleton.merged_haplotagged_bam": str(bam),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            fake_samtools = root / "samtools"
+            fake_samtools.write_text(
+                "#!/usr/bin/env python3\n"
+                "import sys\n"
+                "if sys.argv[1] == 'quickcheck':\n"
+                "    raise SystemExit(0)\n"
+                "if '-H' in sys.argv:\n"
+                "    print('@HD\\tVN:1.6\\tSO:coordinate')\n"
+                "    print('@SQ\\tSN:chr1\\tLN:100')\n"
+                "    print('@SQ\\tSN:chr2\\tLN:200')\n"
+                "else:\n"
+                "    print('read1\\t0\\tchr1\\t1\\t60\\t4=\\t*\\t0\\t0\\tAAAA\\tIIII')\n",
+                encoding="utf-8",
+            )
+            fake_samtools.chmod(0o755)
+            report_path = root / "validation.json"
+            command = [
+                sys.executable,
+                str(
+                    REPOSITORY_ROOT
+                    / "workflow"
+                    / "scripts"
+                    / "validate_reanalysis_input.py"
+                ),
+                "--input",
+                str(bam),
+                "--output",
+                str(report_path),
+                "--reference-index",
+                str(reference_index),
+                "--sample",
+                "sample",
+                "--stage",
+                stage,
+                "--samtools",
+                str(fake_samtools),
+            ]
+            if stage == "pbwgs":
+                command.extend(("--outputs-json", str(outputs)))
+            completed = subprocess.run(
+                command,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            report = (
+                json.loads(report_path.read_text())
+                if report_path.is_file()
+                else None
+            )
+            return completed, report
+
+
 @unittest.skipUnless(shutil.which("snakemake"), "snakemake is not installed")
 class WorkflowDagTest(unittest.TestCase):
     def test_read_and_fiber_branches_build_in_scratch(self):
@@ -234,6 +585,147 @@ class WorkflowDagTest(unittest.TestCase):
             for run_name, hia5 in (("read-run", "no"), ("fiber-run", "yes")):
                 with self.subTest(hia5=hia5):
                     self._dry_run(root, run_name, hia5)
+
+    def test_fiber_branch_starts_with_input_detection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = self._dry_run(
+                Path(temporary),
+                "auto-run",
+                "yes",
+                fiberseq_input="auto",
+            )
+
+        self.assertIn("checkpoint detect_fiberseq_input", completed.stdout)
+        snakefile = (REPOSITORY_ROOT / "Snakefile").read_text(encoding="utf-8")
+        predict_rule = snakefile.split("rule predict_m6a:", 1)[1].split(
+            "\n\nrule ", 1
+        )[0]
+        self.assertIn("{params.executable:q} predict-m6a", predict_rule)
+
+    def test_legacy_fiber_runsheet_defaults_to_auto_detection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = self._dry_run(
+                Path(temporary),
+                "legacy-fiber-run",
+                "yes",
+                fiberseq_input=None,
+            )
+
+        self.assertIn("checkpoint detect_fiberseq_input", completed.stdout)
+
+    def test_detection_report_selects_only_the_required_preparation(self):
+        cases = {
+            "predict_m6a": "predict_m6a",
+            "add_nucleosomes": "add_nucleosomes",
+            "use_existing": None,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for action, expected_rule in cases.items():
+                with self.subTest(action=action):
+                    completed = self._dry_run(
+                        root,
+                        f"detected-{action}",
+                        "yes",
+                        detected_action=action,
+                    )
+                    for rule in ("predict_m6a", "add_nucleosomes"):
+                        if rule == expected_rule:
+                            self.assertIn(f"rule {rule}", completed.stdout)
+                        else:
+                            self.assertNotIn(f"rule {rule}", completed.stdout)
+
+    def test_aligned_recovery_bam_runs_validation_and_current_wdl(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (
+                run_directory,
+                scratch_directory,
+                _,
+                config_path,
+                environment,
+            ) = self._fixture(
+                root,
+                "aligned-recovery",
+                "yes",
+                input_stage="aligned",
+            )
+            validation_run = self._run_dry_run(
+                run_directory,
+                config_path,
+                environment,
+            )
+            self._write_checkpoint_reports(scratch_directory)
+
+            completed = self._run_dry_run(
+                run_directory,
+                config_path,
+                environment,
+            )
+
+        self.assertIn("rule validate_reanalysis_input", validation_run.stdout)
+        self.assertIn("rule hifi_wgs", completed.stdout)
+
+    def test_reused_pbwgs_outputs_skip_current_wdl(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (
+                run_directory,
+                scratch_directory,
+                _,
+                config_path,
+                environment,
+            ) = self._fixture(
+                root,
+                "pbwgs-reuse",
+                "yes",
+                input_stage="pbwgs",
+            )
+            validation_run = self._run_dry_run(
+                run_directory,
+                config_path,
+                environment,
+            )
+            self._write_checkpoint_reports(scratch_directory)
+
+            completed = self._run_dry_run(
+                run_directory,
+                config_path,
+                environment,
+            )
+
+        self.assertIn("rule validate_reanalysis_input", validation_run.stdout)
+        self.assertIn("rule copy_pbwdl", completed.stdout)
+        self.assertNotIn("rule hifi_wgs", completed.stdout)
+
+    def test_fire_only_reuses_pbwgs_bam_without_copying_all_outputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (
+                run_directory,
+                scratch_directory,
+                _,
+                config_path,
+                environment,
+            ) = self._fixture(
+                root,
+                "pbwgs-fire-reuse",
+                "yes",
+                input_stage="pbwgs",
+            )
+            self._write_checkpoint_reports(scratch_directory)
+            self._write_eligibility(scratch_directory)
+
+            completed = self._run_dry_run(
+                run_directory,
+                config_path,
+                environment,
+                target="fire_only",
+            )
+
+        self.assertIn("rule fire_input_bam", completed.stdout)
+        self.assertNotIn("rule copy_pbwdl", completed.stdout)
+        self.assertNotIn("rule hifi_wgs", completed.stdout)
 
     def test_fire_only_uses_native_dag(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -262,6 +754,19 @@ class WorkflowDagTest(unittest.TestCase):
             wgs.mkdir(parents=True)
             (wgs / "sample.GRCh38.haplotagged.bam").touch()
             (wgs / "sample.GRCh38.haplotagged.bam.bai").touch()
+
+            detection = (
+                scratch_directory
+                / "intermediate"
+                / "fiberseq"
+                / "input-detection"
+                / "sample.json"
+            )
+            detection.parent.mkdir(parents=True)
+            detection.write_text(
+                json.dumps({"selected_action": "use_existing"}),
+                encoding="utf-8",
+            )
 
             eligibility_directory = scratch_directory / "intermediate" / "fire"
             eligibility_directory.mkdir(parents=True)
@@ -341,6 +846,8 @@ class WorkflowDagTest(unittest.TestCase):
         root: Path,
         run_name: str,
         hia5: str,
+        fiberseq_input: str | None = "auto",
+        input_stage: str = "raw",
     ) -> tuple[Path, Path, Path, Path, dict[str, str]]:
         run_directory = root / "project" / run_name
         scratch_directory = root / "scratch" / run_name
@@ -380,12 +887,41 @@ class WorkflowDagTest(unittest.TestCase):
             encoding="utf-8",
         )
 
-        runsheet = invocation / "runsheet.csv"
-        runsheet.write_text(
-            "core_name,lab_name,run,cell,barcode,hifi_bam,sex,hia5\n"
-            f"sample,,,,,inputs/sample.bam,F,{hia5}\n",
+        pbwgs_outputs = inputs / "existing-outputs.json"
+        pbwgs_outputs.write_text(
+            json.dumps(
+                {
+                    "humanwgs_singleton.workflow_version": "v2.0.7",
+                    "humanwgs_singleton.stat_mean_depth": 20.0,
+                    "humanwgs_singleton.merged_haplotagged_bam": str(
+                        (inputs / "sample.GRCh38.haplotagged.bam").resolve()
+                    ),
+                }
+            ),
             encoding="utf-8",
         )
+        (inputs / "sample.GRCh38.haplotagged.bam").touch()
+
+        runsheet = invocation / "runsheet.csv"
+        if fiberseq_input is None:
+            runsheet_text = (
+                "core_name,lab_name,run,cell,barcode,hifi_bam,sex,hia5\n"
+                f"sample,,,,,inputs/sample.bam,F,{hia5}\n"
+            )
+        else:
+            hifi_bam = "" if input_stage == "pbwgs" else "inputs/sample.bam"
+            outputs_json = (
+                "inputs/existing-outputs.json"
+                if input_stage == "pbwgs"
+                else ""
+            )
+            runsheet_text = (
+                "core_name,lab_name,run,cell,barcode,hifi_bam,input_stage,"
+                "pbwgs_outputs_json,sex,hia5,fiberseq_input\n"
+                f"sample,,,,,{hifi_bam},{input_stage},{outputs_json},F,"
+                f"{hia5},{fiberseq_input}\n"
+            )
+        runsheet.write_text(runsheet_text, encoding="utf-8")
         config = {
             "rawdir": "inputs",
             "runsheet": "runsheet.csv",
@@ -418,6 +954,9 @@ class WorkflowDagTest(unittest.TestCase):
             "expected_cn_xx": "inputs/xx.bed",
             "expected_cn_xy": "inputs/xy.bed",
             "miniwdl_executable": "miniwdl",
+            "ft_predict_executable": "ft",
+            "fiberseq_detection_reads": 5000,
+            "fiberseq_detection_min_fraction": 0.5,
             "copy_pbwdl_tool": "inputs/copy_pbWDL",
             "shrink_fire_bed_tool": "inputs/shrink_fire_bed",
         }
@@ -444,14 +983,118 @@ class WorkflowDagTest(unittest.TestCase):
             environment,
         )
 
-    def _dry_run(self, root: Path, run_name: str, hia5: str) -> None:
+    def _write_checkpoint_reports(self, scratch_directory: Path) -> None:
+        validation = (
+            scratch_directory
+            / "intermediate"
+            / "reanalysis"
+            / "input-validation"
+            / "sample.json"
+        )
+        validation.parent.mkdir(parents=True)
+        validation.write_text(
+            json.dumps({"validation": "passed"}),
+            encoding="utf-8",
+        )
+        detection = (
+            scratch_directory
+            / "intermediate"
+            / "fiberseq"
+            / "input-detection"
+            / "sample.json"
+        )
+        detection.parent.mkdir(parents=True)
+        detection.write_text(
+            json.dumps({"selected_action": "use_existing"}),
+            encoding="utf-8",
+        )
+
+    def _write_eligibility(self, scratch_directory: Path) -> None:
+        manifest = (
+            scratch_directory
+            / "intermediate"
+            / "fire"
+            / "eligibility.json"
+        )
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(
+            json.dumps(
+                {
+                    "minimum_mean_depth": 8.0,
+                    "eligible_samples": ["sample"],
+                    "samples": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        report = scratch_directory / "results" / "fire" / "eligibility.tsv"
+        report.parent.mkdir(parents=True)
+        report.write_text(
+            "sample\tmean_depth\tminimum_mean_depth\teligible\treason\n"
+            "sample\t20\t8\tyes\teligible\n",
+            encoding="utf-8",
+        )
+
+    def _run_dry_run(
+        self,
+        run_directory: Path,
+        config_path: Path,
+        environment: dict[str, str],
+        target: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        command = ["snakemake"]
+        if target is not None:
+            command.append(target)
+        command.extend(
+            (
+                "--snakefile",
+                str(REPOSITORY_ROOT / "Snakefile"),
+                "--configfile",
+                str(config_path),
+                "--dry-run",
+                "--cores",
+                "1",
+            )
+        )
+        completed = subprocess.run(
+            command,
+            cwd=run_directory,
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout)
+        return completed
+
+    def _dry_run(
+        self,
+        root: Path,
+        run_name: str,
+        hia5: str,
+        fiberseq_input: str | None = "auto",
+        detected_action: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         (
             run_directory,
             scratch_directory,
             _,
             config_path,
             environment,
-        ) = self._fixture(root, run_name, hia5)
+        ) = self._fixture(root, run_name, hia5, fiberseq_input)
+        if detected_action is not None:
+            detection = (
+                scratch_directory
+                / "intermediate"
+                / "fiberseq"
+                / "input-detection"
+                / "sample.json"
+            )
+            detection.parent.mkdir(parents=True)
+            detection.write_text(
+                json.dumps({"selected_action": detected_action}),
+                encoding="utf-8",
+            )
         completed = subprocess.run(
             [
                 "snakemake",
@@ -472,8 +1115,17 @@ class WorkflowDagTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stdout)
         self.assertTrue((scratch_directory / ".snakemake").is_dir())
         self.assertFalse((run_directory / ".snakemake").exists())
-        self.assertIn("checkpoint fire_eligibility", completed.stdout)
         if hia5 == "yes":
-            self.assertIn("rule add_nucleosomes", completed.stdout)
+            if detected_action is None:
+                self.assertIn(
+                    "checkpoint detect_fiberseq_input",
+                    completed.stdout,
+                )
+            else:
+                self.assertNotIn("checkpoint detect_fiberseq_input", completed.stdout)
         else:
+            self.assertIn("checkpoint fire_eligibility", completed.stdout)
+            self.assertNotIn("checkpoint detect_fiberseq_input", completed.stdout)
             self.assertNotIn("rule add_nucleosomes", completed.stdout)
+            self.assertNotIn("rule predict_m6a", completed.stdout)
+        return completed

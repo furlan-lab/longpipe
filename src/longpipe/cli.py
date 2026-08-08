@@ -821,12 +821,104 @@ def _publish_snakemake_metadata(
             shutil.copytree(source, destination_root / name, dirs_exist_ok=True)
 
 
+def _publish_fiberseq_metadata(
+    scratch_directory: Path,
+    run_directory: Path,
+    durable_invocation: Path,
+    runsheet_snapshot: Path,
+    config: dict,
+) -> None:
+    source = (
+        scratch_directory
+        / "intermediate"
+        / "fiberseq"
+        / "input-detection"
+    )
+    sample_names = set(_sample_labels(runsheet_snapshot))
+    if config.get("hia5_gates_fiberseq", True):
+        with runsheet_snapshot.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        sample_names = {
+            row.get("lab_name", "").strip()
+            or row.get("core_name", "").strip()
+            for row in rows
+            if row.get("hia5", "").strip().lower()
+            in {"yes", "y", "true", "t", "1"}
+        }
+
+    def build(stage: Path) -> None:
+        stage.mkdir()
+        for sample in sample_names:
+            report = source / f"{sample}.json"
+            if report.is_file():
+                shutil.copy2(report, stage / report.name)
+
+    for destination in (
+        run_directory / "run-metadata" / "fiberseq-input",
+        durable_invocation / "fiberseq-input",
+    ):
+        _replace_built_tree(destination, build)
+
+
+def _publish_reanalysis_metadata(
+    scratch_directory: Path,
+    run_directory: Path,
+    durable_invocation: Path,
+    runsheet_snapshot: Path,
+) -> None:
+    source = (
+        scratch_directory
+        / "intermediate"
+        / "reanalysis"
+        / "input-validation"
+    )
+    with runsheet_snapshot.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    sample_names = {
+        row.get("lab_name", "").strip()
+        or row.get("core_name", "").strip()
+        for row in rows
+        if row.get("input_stage", "").strip().lower()
+        in {"aligned", "pbwgs"}
+    }
+
+    def build(stage: Path) -> None:
+        stage.mkdir()
+        for sample in sample_names:
+            report = source / f"{sample}.json"
+            if report.is_file():
+                shutil.copy2(report, stage / report.name)
+
+    for destination in (
+        run_directory / "run-metadata" / "reanalysis-input",
+        durable_invocation / "reanalysis-input",
+    ):
+        _replace_built_tree(destination, build)
+
+
 def _publish_diagnostics(
-    scratch_directory: Path, run_directory: Path, durable_invocation: Path
+    scratch_directory: Path,
+    run_directory: Path,
+    durable_invocation: Path,
+    runsheet_snapshot: Path,
+    config: dict,
 ) -> None:
     _replace_tree(scratch_directory / "logs", run_directory / "logs")
     _replace_tree(scratch_directory / "benchmarks", run_directory / "benchmarks")
     _publish_snakemake_metadata(scratch_directory, durable_invocation)
+    _publish_fiberseq_metadata(
+        scratch_directory,
+        run_directory,
+        durable_invocation,
+        runsheet_snapshot,
+        config,
+    )
+    _publish_reanalysis_metadata(
+        scratch_directory,
+        run_directory,
+        durable_invocation,
+        runsheet_snapshot,
+    )
 
 
 def _snakemake_command(
@@ -1013,7 +1105,11 @@ def _run(args: argparse.Namespace) -> int:
 
         try:
             _publish_diagnostics(
-                scratch_directory, run_directory, durable_invocation
+                scratch_directory,
+                run_directory,
+                durable_invocation,
+                runsheet_snapshot,
+                config,
             )
             if return_code == 0:
                 scratch_results = scratch_directory / "results"

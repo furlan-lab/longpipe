@@ -43,5 +43,9 @@ expected_cn_xy: /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v3.
 
 # Externally managed workflow driver and local helper programs
 miniwdl_executable: /fh/fast/furlan_s/grp/software/miniwdl/bin/miniwdl
+# Set this to a wrapper around a CUDA/libtorch-enabled ft build for kinetics BAMs.
+ft_predict_executable: ft
+fiberseq_detection_reads: 5000
+fiberseq_detection_min_fraction: 0.5
 copy_pbwdl_tool: /fh/fast/furlan_s/grp/software/pacbiowdlR/target/release/copy_pbWDL
 shrink_fire_bed_tool: /fh/fast/furlan_s/grp/software/pacbiowdlR/target/release/shrink_fire_bed
