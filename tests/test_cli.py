@@ -310,6 +310,14 @@ print("simulated workflow success")
             result, output, error = self.invoke(arguments)
         self.assertEqual(result, 0, error)
         self.assertIn("Run completed", output)
+        status = json.loads(
+            (run_directory / "run-metadata" / "status.json").read_text()
+        )
+        self.assertEqual(status["command"][1], "all")
+        self.assertLess(
+            status["command"].index("all"),
+            status["command"].index("--configfile"),
+        )
         sample = "Brain_1"
         published_sample = run_directory / "samples" / sample
         published_pileup = (

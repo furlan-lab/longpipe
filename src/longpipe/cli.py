@@ -1053,7 +1053,7 @@ def _run(args: argparse.Namespace) -> int:
         )
         config, _ = _load_run_config(config_snapshot, config_snapshot.parent)
         run_mode = "fire_only" if args.only_fire else "full"
-        targets = ("fire_only",) if args.only_fire else ()
+        targets = ("fire_only",) if args.only_fire else ("all",)
         command = _snakemake_command(
             snakemake_executable,
             workflow_root,
