@@ -318,6 +318,21 @@ inputs because FIRE requires them. For `pbwgs`, it reuses the manifest's final
 BAM instead. FIRE-only publication updates the pileup, bigWigs, and haplotype
 analysis while preserving already published PBWGS, SV, HLA, and cCRE outputs.
 
+Run only specific runsheet rows with `--rows`:
+
+```bash
+longpipe run 260410_BT-brain --rows 1,3,4:8
+```
+
+Rows are numbered from 1 after the CSV header, ranges are inclusive, and the
+example selects rows 1, 3, 4, 5, 6, 7, and 8. Commas combine selections;
+duplicate selections are harmless. Invalid, reversed, zero, and out-of-range
+rows are rejected before the workflow starts. The durable `runsheet.csv`
+remains unchanged, while the invocation record contains the filtered runsheet
+actually used. Successful subset runs replace results only for the selected
+samples and preserve published results and metadata for all unselected
+samples. `--rows` can also be combined with `--only-fire`.
+
 The command remains attached until the workflow succeeds or fails. All active
 Snakemake state and intermediate files are written below:
 

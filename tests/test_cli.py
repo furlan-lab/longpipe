@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import csv
 import io
 import json
 import os
@@ -160,7 +161,7 @@ if not fire_only:
     for sample in samples:
         wgs = results / "wgs" / sample
         wgs.mkdir(parents=True, exist_ok=True)
-        (wgs / f"{sample}.bam").write_text("bam\\n")
+        (wgs / f"{sample}.bam").write_text(f"invocation {count}\\n")
         (wgs / "outputs.json").write_text(json.dumps({
             "haplotagged_bam": str(wgs / f"{sample}.bam"),
             "nested": {"files": [str(wgs / f"{sample}.bam")]},
@@ -209,6 +210,31 @@ print("simulated workflow success")
             cli.main(["--version"])
 
         self.assertEqual(stdout.getvalue().strip(), version("longpipe"))
+
+    def test_runsheet_row_selector_parses_rows_and_inclusive_ranges(self):
+        self.assertEqual(
+            cli._parse_runsheet_rows("1,3,4:8"),
+            (1, 3, 4, 5, 6, 7, 8),
+        )
+        self.assertEqual(
+            cli._parse_runsheet_rows(" 3, 1, 2:4, 3 "),
+            (1, 2, 3, 4),
+        )
+        self.assertIsNone(cli._parse_runsheet_rows(None))
+
+        invalid = {
+            "": "must not be empty",
+            "0": "1-based",
+            "1,,3": "empty selection component",
+            "4:2": "start exceeds end",
+            "1:2:3": "expected a row number",
+            "one": "expected a row number",
+        }
+        for value, message in invalid.items():
+            with self.subTest(value=value), self.assertRaisesRegex(
+                cli.LongpipeError, message
+            ):
+                cli._parse_runsheet_rows(value)
 
     def test_run_uses_snakemake_installed_beside_longpipe(self):
         run_directory = self.setup_run(self.work_one, "sibling-snakemake")
@@ -455,6 +481,66 @@ print("simulated workflow success")
         self.assertEqual(result, 0, error)
         self.assertFalse((self.scratch / "test-run").exists())
         self.assertTrue((run_directory / "samples").is_dir())
+
+    def test_rows_runs_filtered_snapshot_and_preserves_unselected_results(self):
+        run_directory = self.setup_run(self.work_one, "selected-rows")
+        arguments = self.run_arguments("selected-rows")
+        durable_runsheet = run_directory / "runsheet.csv"
+        original_runsheet = durable_runsheet.read_bytes()
+
+        with working_directory(self.work_one):
+            result, _, error = self.invoke(arguments)
+        self.assertEqual(result, 0, error)
+
+        brain_bam = (
+            run_directory / "samples" / "Brain_1" / "pbWGS" / "Brain_1.bam"
+        )
+        bt54_bam = run_directory / "samples" / "BT54" / "pbWGS" / "BT54.bam"
+        self.assertEqual(brain_bam.read_text(), "invocation 1\n")
+        self.assertEqual(bt54_bam.read_text(), "invocation 1\n")
+
+        with working_directory(self.work_one):
+            result, output, error = self.invoke(arguments + ["--rows", "2"])
+        self.assertEqual(result, 0, error)
+        self.assertIn("runsheet rows 2", output)
+        self.assertEqual(durable_runsheet.read_bytes(), original_runsheet)
+        self.assertEqual(brain_bam.read_text(), "invocation 1\n")
+        self.assertEqual(bt54_bam.read_text(), "invocation 2\n")
+        self.assertTrue(
+            (
+                run_directory
+                / "run-metadata"
+                / "fiberseq-input"
+                / "Brain_1.json"
+            ).is_file()
+        )
+
+        status = json.loads(
+            (run_directory / "run-metadata" / "status.json").read_text()
+        )
+        self.assertEqual(status["runsheet_row_selector"], "2")
+        self.assertEqual(status["runsheet_rows"], [2])
+        invocation_runsheet = (
+            run_directory
+            / "run-metadata"
+            / "invocations"
+            / status["invocation_id"]
+            / "runsheet.csv"
+        )
+        with invocation_runsheet.open(newline="") as handle:
+            selected = list(csv.DictReader(handle))
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["core_name"], "BT54")
+
+    def test_rows_rejects_out_of_range_before_creating_scratch(self):
+        self.setup_run(self.work_one, "bad-rows")
+        with working_directory(self.work_one):
+            result, _, error = self.invoke(
+                self.run_arguments("bad-rows") + ["--rows", "3"]
+            )
+        self.assertEqual(result, 2)
+        self.assertIn("has only 2 data rows", error)
+        self.assertFalse((self.scratch / "bad-rows").exists())
 
     def test_fire_only_updates_fire_and_preserves_other_results(self):
         run_directory = self.setup_run(self.work_one, "fire-only-run")

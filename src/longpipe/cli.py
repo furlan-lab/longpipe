@@ -272,10 +272,71 @@ def _invocation_id() -> str:
     return f"{timestamp}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
 
+def _parse_runsheet_rows(value: str | None) -> tuple[int, ...] | None:
+    if value is None:
+        return None
+    if not value.strip():
+        raise LongpipeError("--rows must not be empty")
+
+    selected: set[int] = set()
+    for component in value.split(","):
+        token = component.strip()
+        if not token:
+            raise LongpipeError(
+                f"invalid --rows value {value!r}: empty selection component"
+            )
+        bounds = token.split(":")
+        if len(bounds) > 2 or any(
+            not re.fullmatch(r"[0-9]+", bound.strip()) for bound in bounds
+        ):
+            raise LongpipeError(
+                f"invalid --rows component {token!r}: expected a row number "
+                "or inclusive START:END range"
+            )
+        start = int(bounds[0])
+        end = int(bounds[-1])
+        if start < 1 or end < 1:
+            raise LongpipeError(
+                f"invalid --rows component {token!r}: row numbers are 1-based"
+            )
+        if start > end:
+            raise LongpipeError(
+                f"invalid --rows range {token!r}: start exceeds end"
+            )
+        selected.update(range(start, end + 1))
+    return tuple(sorted(selected))
+
+
+def _selected_runsheet_records(
+    runsheet_path: Path, selected_rows: Sequence[int]
+) -> list[list[str]]:
+    try:
+        with runsheet_path.open(newline="", encoding="utf-8") as handle:
+            records = list(csv.reader(handle))
+    except (OSError, csv.Error) as error:
+        raise LongpipeError(
+            f"could not read runsheet {runsheet_path}: {error}"
+        ) from error
+    if not records:
+        raise LongpipeError(f"runsheet is empty: {runsheet_path}")
+
+    header = records[0]
+    data_rows = [record for record in records[1:] if any(record)]
+    row_count = len(data_rows)
+    unavailable = [row for row in selected_rows if row > row_count]
+    if unavailable:
+        raise LongpipeError(
+            f"--rows selects row {unavailable[0]}, but {runsheet_path} has only "
+            f"{row_count} data row{'s' if row_count != 1 else ''}"
+        )
+    return [header, *(data_rows[row - 1] for row in selected_rows)]
+
+
 def _snapshot_inputs(
     run_directory: Path,
     scratch_directory: Path,
     invocation_id: str,
+    selected_runsheet: Sequence[Sequence[str]] | None = None,
 ) -> tuple[Path, Path, Path]:
     config_path = run_directory / "config.yaml"
     _, runsheet_path = _load_run_config(config_path, run_directory)
@@ -286,7 +347,11 @@ def _snapshot_inputs(
     config_snapshot = invocation_directory / "config.yaml"
     runsheet_snapshot = invocation_directory / "runsheet.csv"
     shutil.copy2(config_path, config_snapshot)
-    shutil.copy2(runsheet_path, runsheet_snapshot)
+    if selected_runsheet is None:
+        shutil.copy2(runsheet_path, runsheet_snapshot)
+    else:
+        with runsheet_snapshot.open("w", newline="", encoding="utf-8") as handle:
+            csv.writer(handle, lineterminator="\n").writerows(selected_runsheet)
 
     durable_invocation = (
         run_directory / "run-metadata" / "invocations" / invocation_id
@@ -690,11 +755,77 @@ def _build_sample_results(
             )
 
 
+def _replace_selected_sample_trees(
+    durable_samples: Path,
+    sample_names: Sequence[str],
+    build: Callable[[Path], None],
+) -> None:
+    durable_samples.parent.mkdir(parents=True, exist_ok=True)
+    stage = durable_samples.parent / (
+        f".{durable_samples.name}.rows-stage-{uuid.uuid4().hex}"
+    )
+    backups = durable_samples.parent / (
+        f".{durable_samples.name}.rows-backup-{uuid.uuid4().hex}"
+    )
+    published: list[str] = []
+    pending: tuple[str, bool] | None = None
+    publication_complete = False
+    rollback_complete = False
+
+    def remove(path: Path) -> None:
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+
+    try:
+        build(stage)
+        durable_samples.mkdir(exist_ok=True)
+        backups.mkdir()
+        for sample in sample_names:
+            source = stage / sample
+            destination = durable_samples / sample
+            backup = backups / sample
+            had_destination = destination.exists() or destination.is_symlink()
+            pending = (sample, had_destination)
+            if had_destination:
+                os.replace(destination, backup)
+            os.replace(source, destination)
+            published.append(sample)
+            pending = None
+        publication_complete = True
+    except BaseException:
+        if pending is not None:
+            sample, had_destination = pending
+            source = stage / sample
+            destination = durable_samples / sample
+            backup = backups / sample
+            if had_destination:
+                if backup.exists() or backup.is_symlink():
+                    remove(destination)
+                    os.replace(backup, destination)
+            elif not source.exists():
+                remove(destination)
+        for sample in reversed(published):
+            destination = durable_samples / sample
+            backup = backups / sample
+            remove(destination)
+            if backup.exists() or backup.is_symlink():
+                os.replace(backup, destination)
+        rollback_complete = True
+        raise
+    finally:
+        remove(stage)
+        if publication_complete or rollback_complete:
+            remove(backups)
+
+
 def _publish_sample_results(
     scratch_results: Path,
     run_directory: Path,
     runsheet_snapshot: Path,
     config: dict,
+    preserve_unselected: bool = False,
 ) -> None:
     if not scratch_results.is_dir():
         raise LongpipeError(
@@ -709,17 +840,26 @@ def _publish_sample_results(
         raise LongpipeError("fire_version must be a non-empty string")
     durable_samples = run_directory / "samples"
 
-    _replace_built_tree(
-        durable_samples,
-        lambda stage: _build_sample_results(
+    def build(stage: Path) -> None:
+        _build_sample_results(
             stage,
             scratch_results,
             durable_samples,
             sample_names,
             set(ccre_peaks),
             fire_version,
-        ),
-    )
+        )
+    if preserve_unselected:
+        _replace_selected_sample_trees(
+            durable_samples,
+            sample_names,
+            build,
+        )
+    else:
+        _replace_built_tree(
+            durable_samples,
+            build,
+        )
     _atomic_copy(
         scratch_results / "fire" / "eligibility.tsv",
         run_directory / "run-metadata" / "fire-eligibility.tsv",
@@ -827,6 +967,7 @@ def _publish_fiberseq_metadata(
     durable_invocation: Path,
     runsheet_snapshot: Path,
     config: dict,
+    preserve_unselected: bool = False,
 ) -> None:
     source = (
         scratch_directory
@@ -834,7 +975,8 @@ def _publish_fiberseq_metadata(
         / "fiberseq"
         / "input-detection"
     )
-    sample_names = set(_sample_labels(runsheet_snapshot))
+    selected_samples = set(_sample_labels(runsheet_snapshot))
+    sample_names = selected_samples
     if config.get("hia5_gates_fiberseq", True):
         with runsheet_snapshot.open(newline="", encoding="utf-8") as handle:
             rows = list(csv.DictReader(handle))
@@ -846,18 +988,26 @@ def _publish_fiberseq_metadata(
             in {"yes", "y", "true", "t", "1"}
         }
 
-    def build(stage: Path) -> None:
-        stage.mkdir()
-        for sample in sample_names:
-            report = source / f"{sample}.json"
-            if report.is_file():
-                shutil.copy2(report, stage / report.name)
+    def replace(destination: Path, preserve: bool) -> None:
+        def build(stage: Path) -> None:
+            if preserve and destination.is_dir():
+                shutil.copytree(destination, stage)
+                for sample in selected_samples:
+                    (stage / f"{sample}.json").unlink(missing_ok=True)
+            else:
+                stage.mkdir()
+            for sample in sample_names:
+                report = source / f"{sample}.json"
+                if report.is_file():
+                    shutil.copy2(report, stage / report.name)
 
-    for destination in (
-        run_directory / "run-metadata" / "fiberseq-input",
-        durable_invocation / "fiberseq-input",
-    ):
         _replace_built_tree(destination, build)
+
+    replace(
+        run_directory / "run-metadata" / "fiberseq-input",
+        preserve_unselected,
+    )
+    replace(durable_invocation / "fiberseq-input", False)
 
 
 def _publish_reanalysis_metadata(
@@ -865,6 +1015,7 @@ def _publish_reanalysis_metadata(
     run_directory: Path,
     durable_invocation: Path,
     runsheet_snapshot: Path,
+    preserve_unselected: bool = False,
 ) -> None:
     source = (
         scratch_directory
@@ -874,6 +1025,7 @@ def _publish_reanalysis_metadata(
     )
     with runsheet_snapshot.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
+    selected_samples = set(_sample_labels(runsheet_snapshot))
     sample_names = {
         row.get("lab_name", "").strip()
         or row.get("core_name", "").strip()
@@ -882,18 +1034,26 @@ def _publish_reanalysis_metadata(
         in {"aligned", "pbwgs"}
     }
 
-    def build(stage: Path) -> None:
-        stage.mkdir()
-        for sample in sample_names:
-            report = source / f"{sample}.json"
-            if report.is_file():
-                shutil.copy2(report, stage / report.name)
+    def replace(destination: Path, preserve: bool) -> None:
+        def build(stage: Path) -> None:
+            if preserve and destination.is_dir():
+                shutil.copytree(destination, stage)
+                for sample in selected_samples:
+                    (stage / f"{sample}.json").unlink(missing_ok=True)
+            else:
+                stage.mkdir()
+            for sample in sample_names:
+                report = source / f"{sample}.json"
+                if report.is_file():
+                    shutil.copy2(report, stage / report.name)
 
-    for destination in (
-        run_directory / "run-metadata" / "reanalysis-input",
-        durable_invocation / "reanalysis-input",
-    ):
         _replace_built_tree(destination, build)
+
+    replace(
+        run_directory / "run-metadata" / "reanalysis-input",
+        preserve_unselected,
+    )
+    replace(durable_invocation / "reanalysis-input", False)
 
 
 def _publish_diagnostics(
@@ -902,6 +1062,7 @@ def _publish_diagnostics(
     durable_invocation: Path,
     runsheet_snapshot: Path,
     config: dict,
+    preserve_unselected: bool = False,
 ) -> None:
     _replace_tree(scratch_directory / "logs", run_directory / "logs")
     _replace_tree(scratch_directory / "benchmarks", run_directory / "benchmarks")
@@ -912,12 +1073,14 @@ def _publish_diagnostics(
         durable_invocation,
         runsheet_snapshot,
         config,
+        preserve_unselected,
     )
     _publish_reanalysis_metadata(
         scratch_directory,
         run_directory,
         durable_invocation,
         runsheet_snapshot,
+        preserve_unselected,
     )
 
 
@@ -1029,7 +1192,15 @@ def _run(args: argparse.Namespace) -> int:
     run_directory = _run_directory(args.project_root, args.run_name)
     if not run_directory.is_dir():
         raise LongpipeError(f"run directory does not exist: {run_directory}")
-    _load_run_config(run_directory / "config.yaml", run_directory)
+    _, runsheet_path = _load_run_config(
+        run_directory / "config.yaml", run_directory
+    )
+    row_selection = _parse_runsheet_rows(args.rows)
+    selected_runsheet = (
+        _selected_runsheet_records(runsheet_path, row_selection)
+        if row_selection is not None
+        else None
+    )
 
     scratch_root, scratch_directory = _scratch_directory(
         args.scratch_root, args.run_name
@@ -1049,7 +1220,10 @@ def _run(args: argparse.Namespace) -> int:
 
         invocation_id = _invocation_id()
         config_snapshot, runsheet_snapshot, durable_invocation = _snapshot_inputs(
-            run_directory, scratch_directory, invocation_id
+            run_directory,
+            scratch_directory,
+            invocation_id,
+            selected_runsheet,
         )
         config, _ = _load_run_config(config_snapshot, config_snapshot.parent)
         run_mode = "fire_only" if args.only_fire else "full"
@@ -1072,6 +1246,9 @@ def _run(args: argparse.Namespace) -> int:
             "started_at": _now(),
             "status": "running",
         }
+        if row_selection is not None:
+            status["runsheet_row_selector"] = args.rows
+            status["runsheet_rows"] = list(row_selection)
         _record_status(status, scratch_directory, run_directory, durable_invocation)
 
         environment = os.environ.copy()
@@ -1086,6 +1263,8 @@ def _run(args: argparse.Namespace) -> int:
         )
 
         mode_label = "FIRE only" if args.only_fire else "full workflow"
+        if row_selection is not None:
+            mode_label += f" for runsheet rows {args.rows}"
         print(f"Running {mode_label} for {args.run_name!r} in {scratch_directory}")
         try:
             return_code = _stream_command(
@@ -1110,6 +1289,7 @@ def _run(args: argparse.Namespace) -> int:
                 durable_invocation,
                 runsheet_snapshot,
                 config,
+                row_selection is not None,
             )
             if return_code == 0:
                 scratch_results = scratch_directory / "results"
@@ -1126,6 +1306,7 @@ def _run(args: argparse.Namespace) -> int:
                         run_directory,
                         runsheet_snapshot,
                         config,
+                        preserve_unselected=row_selection is not None,
                     )
         except BaseException as error:
             status["error"] = f"publication failed: {error}"
@@ -1229,6 +1410,14 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "run FIRE and required upstream dependencies while skipping cCRE, "
             "SV, and HLA targets"
+        ),
+    )
+    run_parser.add_argument(
+        "--rows",
+        metavar="SELECTION",
+        help=(
+            "run only selected 1-based runsheet data rows; accepts comma-separated "
+            "rows and inclusive ranges such as 1,3,4:8"
         ),
     )
     run_parser.add_argument(
