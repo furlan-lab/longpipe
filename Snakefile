@@ -96,7 +96,17 @@ EXPECTED_CN = {
 COPY_PBWDL = configured_path(config["copy_pbwdl_tool"])
 SHRINK_FIRE_BED = configured_path(config["shrink_fire_bed_tool"])
 MINIWDL = configured_executable(config["miniwdl_executable"])
-FT_PREDICT = configured_executable(config.get("ft_predict_executable", "ft"))
+FT_PREDICT_CONFIGURED = config.get("ft_predict_executable", "ft")
+FT_PREDICT_BACKEND = config.get("ft_predict_backend")
+if FT_PREDICT_BACKEND is None:
+    FT_PREDICT_BACKEND = (
+        "external" if FT_PREDICT_CONFIGURED != "ft" else "conda"
+    )
+FT_PREDICT = (
+    configured_executable(FT_PREDICT_CONFIGURED)
+    if FT_PREDICT_BACKEND == "external"
+    else "ft"
+)
 FIBERSEQ_DETECTION_READS = int(config.get("fiberseq_detection_reads", 5000))
 FIBERSEQ_DETECTION_MIN_FRACTION = float(
     config.get("fiberseq_detection_min_fraction", 0.5)
@@ -732,19 +742,24 @@ rule predict_m6a:
     threads: 30
     resources:
         mem_mb=128000,
-        runtime=480,
-        gpu=1
+        runtime=480 if FT_PREDICT_BACKEND == "external" else 1440,
+        gpu=1 if FT_PREDICT_BACKEND == "external" else 0
     params:
-        executable=FT_PREDICT
+        executable=FT_PREDICT,
+        backend=FT_PREDICT_BACKEND
     log:
         "logs/predict_m6a/{sample}.log"
     benchmark:
         "benchmarks/predict_m6a/{sample}.tsv"
+    conda:
+        "envs/fibertools.yaml"
     shell:
         """
         mkdir -p "$(dirname {output:q})" "$(dirname {log:q})"
+        printf 'backend: %s\n' {params.backend:q} > {log:q}
+        {params.executable:q} --version >> {log:q} 2>&1
         {params.executable:q} predict-m6a -t {threads} \
-            {input.bam:q} {output:q} > {log:q} 2>&1
+            {input.bam:q} {output:q} >> {log:q} 2>&1
         test -s {output:q}
         """
 

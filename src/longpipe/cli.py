@@ -1124,6 +1124,142 @@ def _resolve_snakemake_executable(explicit: str | None) -> str:
     )
 
 
+def _ft_predict_backend(config: dict) -> str:
+    configured_backend = config.get("ft_predict_backend")
+    configured_executable = config.get("ft_predict_executable", "ft")
+    if configured_backend is None:
+        return "external" if configured_executable != "ft" else "conda"
+    if configured_backend not in {"conda", "external"}:
+        raise LongpipeError(
+            "ft_predict_backend must be either 'conda' or 'external'"
+        )
+    return configured_backend
+
+
+def _run_ft_preflight(
+    executable: Path,
+    arguments: Sequence[str],
+    environment: dict[str, str],
+    run_directory: Path,
+) -> str:
+    command = [str(executable), *arguments]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=run_directory,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            timeout=15,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise LongpipeError(
+            f"external ft preflight timed out: {' '.join(command)}"
+        ) from error
+    except OSError as error:
+        raise LongpipeError(
+            f"could not run external ft executable {executable}: {error}"
+        ) from error
+
+    output = completed.stdout.strip()
+    if completed.returncode != 0:
+        detail = f": {output}" if output else ""
+        raise LongpipeError(
+            f"external ft preflight failed with exit code "
+            f"{completed.returncode} while running {' '.join(command)}{detail}"
+        )
+    return output
+
+
+def _validate_ft_predict_config(
+    config: dict, run_directory: Path
+) -> dict[str, str]:
+    backend = _ft_predict_backend(config)
+    if backend == "conda":
+        return {"backend": backend}
+
+    configured_executable = config.get("ft_predict_executable")
+    if (
+        not isinstance(configured_executable, str)
+        or not configured_executable.strip()
+    ):
+        raise LongpipeError(
+            "ft_predict_executable must be set when ft_predict_backend is external"
+        )
+    expanded = os.path.expandvars(
+        os.path.expanduser(configured_executable.strip())
+    )
+    if os.sep not in expanded:
+        raise LongpipeError(
+            "external ft_predict_executable must be an explicit absolute or "
+            "run-relative path, not a PATH-only command"
+        )
+    executable = _path(expanded, run_directory)
+    if not executable.is_file():
+        raise LongpipeError(f"external ft executable does not exist: {executable}")
+    if not os.access(executable, os.X_OK):
+        raise LongpipeError(f"external ft executable is not executable: {executable}")
+
+    environment = os.environ.copy()
+    for variable in (
+        "LIBTORCH",
+        "LIBTORCH_CXX11_ABI",
+        "LD_LIBRARY_PATH",
+        "DYLD_LIBRARY_PATH",
+        "LD_PRELOAD",
+    ):
+        environment.pop(variable, None)
+
+    version_output = _run_ft_preflight(
+        executable,
+        ("--version",),
+        environment,
+        run_directory,
+    )
+    version_match = re.search(
+        r"\bfibertools-rs\s+v?(\d+\.\d+\.\d+)\b", version_output
+    )
+    if version_match is None:
+        raise LongpipeError(
+            f"could not determine fibertools-rs version from {executable}: "
+            f"{version_output!r}"
+        )
+    version = version_match.group(1)
+
+    _run_ft_preflight(
+        executable,
+        ("predict-m6a", "--help"),
+        environment,
+        run_directory,
+    )
+
+    expected_version = config.get("ft_predict_expected_version")
+    result = {
+        "backend": backend,
+        "executable": str(executable),
+        "version": version,
+    }
+    if expected_version is not None:
+        if (
+            not isinstance(expected_version, str)
+            or not expected_version.strip()
+        ):
+            raise LongpipeError(
+                "ft_predict_expected_version must be a non-empty version string"
+            )
+        normalized_expected = expected_version.strip().removeprefix("v")
+        if normalized_expected != version:
+            raise LongpipeError(
+                f"external ft version mismatch: expected {normalized_expected}, "
+                f"found {version} at {executable}"
+            )
+        result["expected_version"] = normalized_expected
+    return result
+
+
 def _stream_command(
     command: Sequence[str],
     environment: dict[str, str],
@@ -1192,7 +1328,7 @@ def _run(args: argparse.Namespace) -> int:
     run_directory = _run_directory(args.project_root, args.run_name)
     if not run_directory.is_dir():
         raise LongpipeError(f"run directory does not exist: {run_directory}")
-    _, runsheet_path = _load_run_config(
+    run_config, runsheet_path = _load_run_config(
         run_directory / "config.yaml", run_directory
     )
     row_selection = _parse_runsheet_rows(args.rows)
@@ -1209,6 +1345,12 @@ def _run(args: argparse.Namespace) -> int:
     snakemake_executable = _resolve_snakemake_executable(
         args.snakemake_executable
     )
+    ft_predict_runtime = _validate_ft_predict_config(run_config, run_directory)
+    if ft_predict_runtime["backend"] == "external":
+        print(
+            f"Validated external ft {ft_predict_runtime['version']}: "
+            f"{ft_predict_runtime['executable']}"
+        )
 
     with _run_lock(scratch_root, args.run_name, run_directory):
         if scratch_directory.exists():
@@ -1245,6 +1387,7 @@ def _run(args: argparse.Namespace) -> int:
             "scratch_directory": str(scratch_directory),
             "started_at": _now(),
             "status": "running",
+            "ft_predict": ft_predict_runtime,
         }
         if row_selection is not None:
             status["runsheet_row_selector"] = args.rows

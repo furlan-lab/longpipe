@@ -236,6 +236,123 @@ print("simulated workflow success")
             ):
                 cli._parse_runsheet_rows(value)
 
+    def test_ft_predict_backend_preserves_legacy_configuration(self):
+        self.assertEqual(
+            cli._ft_predict_backend({"ft_predict_executable": "ft"}),
+            "conda",
+        )
+        self.assertEqual(
+            cli._ft_predict_backend(
+                {"ft_predict_executable": "/site/bin/gpu-ft"}
+            ),
+            "external",
+        )
+        self.assertEqual(
+            cli._ft_predict_backend(
+                {
+                    "ft_predict_backend": "conda",
+                    "ft_predict_executable": "/site/bin/gpu-ft",
+                }
+            ),
+            "conda",
+        )
+
+    def test_external_ft_predict_preflight_uses_clean_runtime(self):
+        binary = self.root / "bin" / "ft"
+        binary.parent.mkdir()
+        binary.write_text(
+            """#!/bin/sh
+if [ "${LD_LIBRARY_PATH+x}" = x ] || [ "${LIBTORCH+x}" = x ]; then
+    echo "runtime variables leaked"
+    exit 9
+fi
+if [ "$1" = "--version" ]; then
+    printf 'fibertools-rs v0.12.0\tgit-commit c881786\n'
+    exit 0
+fi
+if [ "$1" = "predict-m6a" ] && [ "$2" = "--help" ]; then
+    echo "predict help"
+    exit 0
+fi
+exit 2
+""",
+            encoding="utf-8",
+        )
+        binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+
+        with environment(LD_LIBRARY_PATH="/broken", LIBTORCH="/broken"):
+            result = cli._validate_ft_predict_config(
+                {
+                    "ft_predict_backend": "external",
+                    "ft_predict_executable": "bin/ft",
+                    "ft_predict_expected_version": "v0.12.0",
+                },
+                self.root,
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "backend": "external",
+                "executable": str(binary.resolve()),
+                "expected_version": "0.12.0",
+                "version": "0.12.0",
+            },
+        )
+
+    def test_external_ft_predict_preflight_rejects_version_mismatch(self):
+        binary = self.root / "ft"
+        binary.write_text(
+            """#!/bin/sh
+if [ "$1" = "--version" ]; then
+    echo "fibertools-rs v0.12.0"
+    exit 0
+fi
+if [ "$1" = "predict-m6a" ] && [ "$2" = "--help" ]; then
+    exit 0
+fi
+exit 2
+""",
+            encoding="utf-8",
+        )
+        binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+
+        with self.assertRaisesRegex(
+            cli.LongpipeError,
+            "version mismatch: expected 0.9.0, found 0.12.0",
+        ):
+            cli._validate_ft_predict_config(
+                {
+                    "ft_predict_backend": "external",
+                    "ft_predict_executable": str(binary),
+                    "ft_predict_expected_version": "0.9.0",
+                },
+                self.root,
+            )
+
+    def test_external_ft_predict_preflight_reports_loader_failure(self):
+        binary = self.root / "broken-ft"
+        binary.write_text(
+            """#!/bin/sh
+echo "error while loading shared libraries: libtorch_cuda.so: not found"
+exit 127
+""",
+            encoding="utf-8",
+        )
+        binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+
+        with self.assertRaisesRegex(
+            cli.LongpipeError,
+            "libtorch_cuda.so: not found",
+        ):
+            cli._validate_ft_predict_config(
+                {
+                    "ft_predict_backend": "external",
+                    "ft_predict_executable": str(binary),
+                },
+                self.root,
+            )
+
     def test_run_uses_snakemake_installed_beside_longpipe(self):
         run_directory = self.setup_run(self.work_one, "sibling-snakemake")
         sibling_directory = self.root / "pipx" / "bin"

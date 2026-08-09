@@ -43,8 +43,12 @@ expected_cn_xy: /fh/fast/furlan_s/grp/refs/long_read_refs/hifi-wdl-resources-v3.
 
 # Externally managed workflow driver and local helper programs
 miniwdl_executable: /fh/fast/furlan_s/grp/software/miniwdl/bin/miniwdl
-# Set this to a wrapper around a CUDA/libtorch-enabled ft build for kinetics BAMs.
+# The portable default uses the CPU-only Bioconda build. For GPU prediction,
+# set the backend to external and provide an explicit path to a self-contained
+# binary or wrapper plus its expected version.
+ft_predict_backend: conda
 ft_predict_executable: ft
+# ft_predict_expected_version: 0.12.0
 fiberseq_detection_reads: 5000
 fiberseq_detection_min_fraction: 0.5
 copy_pbwdl_tool: /fh/fast/furlan_s/grp/software/pacbiowdlR/target/release/copy_pbWDL

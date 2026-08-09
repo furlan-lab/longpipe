@@ -36,6 +36,10 @@ class ConfigSchemaTest(unittest.TestCase):
         self.assertEqual(
             schema["properties"]["ft_predict_executable"]["default"], "ft"
         )
+        self.assertEqual(
+            schema["properties"]["ft_predict_backend"]["enum"],
+            ["conda", "external"],
+        )
 
     def test_runsheet_accepts_explicit_fiberseq_input_types(self):
         from jsonschema import Draft202012Validator
@@ -601,6 +605,12 @@ class WorkflowDagTest(unittest.TestCase):
             "\n\nrule ", 1
         )[0]
         self.assertIn("{params.executable:q} predict-m6a", predict_rule)
+        self.assertIn('"envs/fibertools.yaml"', predict_rule)
+        self.assertIn("{params.executable:q} --version", predict_rule)
+        self.assertIn(
+            'gpu=1 if FT_PREDICT_BACKEND == "external" else 0',
+            predict_rule,
+        )
 
     def test_legacy_fiber_runsheet_defaults_to_auto_detection(self):
         with tempfile.TemporaryDirectory() as temporary:

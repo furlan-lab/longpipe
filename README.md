@@ -59,13 +59,32 @@ bedtools, pbtk, Sawfish, and SVTopo. A working `conda` executable must
 therefore be available on the submit and compute nodes, but no Longpipe Conda
 environment needs to be activated for standard m6A-tagged inputs.
 
-Kinetics inputs use `ft predict-m6a`, whose GPU-enabled build is externally
-managed because the Bioconda build does not include libtorch or GPU
-acceleration. Set `ft_predict_executable` to a CUDA/libtorch-enabled `ft`
-binary or, preferably, a site wrapper that prepares its runtime environment
-and then forwards arguments to `ft`. The executable must be available on
-compute nodes. A CPU-only `ft` remains functional but prediction is much
-slower.
+Kinetics inputs use `ft predict-m6a`. The portable default runs the pinned
+Bioconda build on CPUs because Bioconda does not include libtorch or GPU
+acceleration. This fallback requires no separate Fibertools installation, but
+it is substantially slower. See the
+[Fibertools installation guide](https://fiberseq.github.io/fibertools/install.html)
+for the upstream explanation of the Bioconda and libtorch builds.
+
+Users with a prebuilt GPU-capable executable can opt in per run:
+
+```yaml
+ft_predict_backend: external
+ft_predict_executable: /absolute/path/to/ft
+ft_predict_expected_version: 0.12.0
+```
+
+The executable may instead be a site wrapper that fully prepares its own
+runtime. Longpipe resolves run-relative paths against the durable run
+directory, but rejects PATH-only external commands. Before creating or
+resuming scratch state, `longpipe run` executes `ft --version` and
+`ft predict-m6a --help` with inherited libtorch variables removed. This catches
+missing shared libraries and unusable wrappers before Snakemake submits jobs.
+When `ft_predict_expected_version` is set, the detected version must match.
+
+Existing configurations remain compatible: absent `ft_predict_backend`, a
+plain `ft_predict_executable: ft` selects Conda, while any previously
+configured custom executable selects the external backend.
 
 MiniWDL remains externally managed because it requires site scheduler
 configuration. FIRE's pileup-producing DAG is maintained in Longpipe and uses
@@ -285,11 +304,14 @@ values override branch selection but still validate that the required tags
 are present. The observed counts, fractions, reason, and selected action are
 published for each Fiber-seq sample under `run-metadata/fiberseq-input/`.
 
-Prediction uses 30 threads, one GPU, 128 GB total memory, and an eight-hour
-runtime request. Unlike `--mem-per-cpu=21000MB -c 30`, this requests 128 GB
-total rather than approximately 630 GB. `ft predict-m6a` drops the bulky
-kinetics tags by default, matching the standard command; the source BAM is
-read in place and remains unchanged.
+Prediction uses 30 threads and 128 GB total memory. The default Conda backend
+requests no GPU and allows 24 hours for the slower CPU implementation. The
+external backend requests one GPU and allows eight hours. Unlike
+`--mem-per-cpu=21000MB -c 30`, both modes request 128 GB total rather than
+approximately 630 GB. The rule records the selected backend and actual
+Fibertools version in its log. `ft predict-m6a` drops the bulky kinetics tags
+by default, matching the standard command; the source BAM is read in place and
+remains unchanged.
 
 ### HLA Modes
 

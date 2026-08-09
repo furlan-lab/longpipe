@@ -149,6 +149,12 @@ properties:
     type: string
     minLength: 1
     default: ft
+  ft_predict_backend:
+    type: string
+    enum: [conda, external]
+  ft_predict_expected_version:
+    type: string
+    pattern: "^v?[0-9]+\\.[0-9]+\\.[0-9]+$"
   fiberseq_detection_reads:
     type: integer
     minimum: 1
