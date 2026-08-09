@@ -657,18 +657,21 @@ rule validate_reanalysis_input:
     shell:
         """
         mkdir -p "$(dirname {output.report:q})" "$(dirname {log:q})"
-        outputs_json_args=()
-        if [[ -n {params.outputs_json:q} ]]; then
-            outputs_json_args=(--outputs-json {params.outputs_json:q})
-        fi
-        python {params.script:q} \
-            --input {input.bam:q} \
-            --output {output.report:q} \
-            --reference-index {input.reference_index:q} \
-            --sample {wildcards.sample:q} \
-            --stage {params.stage:q} \
-            "${{outputs_json_args[@]}}" \
-            > {log:q} 2>&1
+        outputs_json={params.outputs_json:q}
+        run_validator() {{
+            python {params.script:q} \
+                --input {input.bam:q} \
+                --output {output.report:q} \
+                --reference-index {input.reference_index:q} \
+                --sample {wildcards.sample:q} \
+                --stage {params.stage:q} \
+                "$@"
+        }}
+        if [[ -n "$outputs_json" ]]; then
+            run_validator --outputs-json "$outputs_json"
+        else
+            run_validator
+        fi > {log:q} 2>&1
         """
 
 

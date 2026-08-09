@@ -664,6 +664,7 @@ class WorkflowDagTest(unittest.TestCase):
                 run_directory,
                 config_path,
                 environment,
+                printshellcmds=True,
             )
             self._write_checkpoint_reports(scratch_directory)
 
@@ -674,6 +675,9 @@ class WorkflowDagTest(unittest.TestCase):
             )
 
         self.assertIn("rule validate_reanalysis_input", validation_run.stdout)
+        self.assertRegex(validation_run.stdout, r"(?m)^\s*outputs_json=$")
+        self.assertIn('if [[ -n "$outputs_json" ]]', validation_run.stdout)
+        self.assertIn("run_validator\n", validation_run.stdout)
         self.assertIn("rule hifi_wgs", completed.stdout)
 
     def test_reused_pbwgs_outputs_skip_current_wdl(self):
@@ -695,6 +699,7 @@ class WorkflowDagTest(unittest.TestCase):
                 run_directory,
                 config_path,
                 environment,
+                printshellcmds=True,
             )
             self._write_checkpoint_reports(scratch_directory)
 
@@ -705,8 +710,62 @@ class WorkflowDagTest(unittest.TestCase):
             )
 
         self.assertIn("rule validate_reanalysis_input", validation_run.stdout)
+        self.assertIn(
+            "outputs_json="
+            f"{(run_directory / 'inputs' / 'existing-outputs.json').resolve()}",
+            validation_run.stdout,
+        )
+        self.assertIn('if [[ -n "$outputs_json" ]]', validation_run.stdout)
+        self.assertIn(
+            'run_validator --outputs-json "$outputs_json"',
+            validation_run.stdout,
+        )
         self.assertIn("rule copy_pbwdl", completed.stdout)
         self.assertNotIn("rule hifi_wgs", completed.stdout)
+
+    def test_reanalysis_outputs_json_shell_handles_optional_path(self):
+        snakefile = (REPOSITORY_ROOT / "Snakefile").read_text(encoding="utf-8")
+        validation_rule = snakefile.split(
+            "rule validate_reanalysis_input:", 1
+        )[1].split("\n\nrule ", 1)[0]
+        self.assertIn("outputs_json={params.outputs_json:q}", validation_rule)
+        self.assertIn("run_validator()", validation_rule)
+        self.assertIn('if [[ -n "$outputs_json" ]]', validation_rule)
+        self.assertIn(
+            'run_validator --outputs-json "$outputs_json"',
+            validation_rule,
+        )
+
+        shell = r'''set -euo pipefail
+outputs_json=$1
+run_validator() {
+    for argument in "$@"; do
+        printf '%s\0' "$argument"
+    done
+}
+if [[ -n "$outputs_json" ]]; then
+    run_validator --outputs-json "$outputs_json"
+else
+    run_validator
+fi
+'''
+        cases = {
+            "aligned": ("", b""),
+            "pbwgs": (
+                "/tmp/path with spaces/outputs.json",
+                b"--outputs-json\0/tmp/path with spaces/outputs.json\0",
+            ),
+        }
+        for stage, (outputs_json, expected) in cases.items():
+            with self.subTest(stage=stage):
+                completed = subprocess.run(
+                    ["/bin/bash", "-c", shell, "bash", outputs_json],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(completed.stdout, expected)
 
     def test_fire_only_reuses_pbwgs_bam_without_copying_all_outputs(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1051,6 +1110,7 @@ class WorkflowDagTest(unittest.TestCase):
         config_path: Path,
         environment: dict[str, str],
         target: str | None = None,
+        printshellcmds: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         command = ["snakemake"]
         if target is not None:
@@ -1066,6 +1126,8 @@ class WorkflowDagTest(unittest.TestCase):
                 "1",
             )
         )
+        if printshellcmds:
+            command.append("--printshellcmds")
         completed = subprocess.run(
             command,
             cwd=run_directory,
