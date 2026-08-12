@@ -22,4 +22,96 @@ export MINIWDL__CALL_CACHE__DIR="${cache_root}/miniwdl_call_cache"
 export MINIWDL__SINGULARITY__IMAGE_CACHE="${cache_root}/miniwdl_singularity_cache"
 export PYTHONNOUSERSITE=1
 
-exec "${install_root}/env/bin/miniwdl" "$@"
+miniwdl="${install_root}/env/bin/miniwdl"
+
+if [[ "${1:-}" != "run" ]]; then
+    exec "${miniwdl}" "$@"
+fi
+
+run_dir=""
+output_json=""
+arguments=("$@")
+for ((index = 0; index < ${#arguments[@]}; index++)); do
+    case "${arguments[index]}" in
+        --dir)
+            ((index += 1))
+            run_dir="${arguments[index]:-}"
+            ;;
+        -o|--output)
+            ((index += 1))
+            output_json="${arguments[index]:-}"
+            ;;
+    esac
+done
+
+if [[ -z "${run_dir}" || -z "${output_json}" ]]; then
+    exec "${miniwdl}" "$@"
+fi
+
+max_attempts="${LONGPIPE_MINIWDL_MAX_ATTEMPTS:-2}"
+backoff_seconds="${LONGPIPE_MINIWDL_BACKOFF_SECONDS:-5}"
+if [[ ! "${max_attempts}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "miniwdl wrapper: LONGPIPE_MINIWDL_MAX_ATTEMPTS must be a positive integer" >&2
+    exit 2
+fi
+if [[ ! "${backoff_seconds}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    echo "miniwdl wrapper: LONGPIPE_MINIWDL_BACKOFF_SECONDS must be nonnegative" >&2
+    exit 2
+fi
+
+mkdir -p "${run_dir}" "$(dirname "${output_json}")"
+
+is_cache_race() {
+    local attempt_log="$1"
+    grep -Fq "WDL/runtime/cache.py" "${attempt_log}" &&
+        grep -Fq "in _check_files_coherence" "${attempt_log}" &&
+        grep -Fq "in _effective_mtime" "${attempt_log}" &&
+        grep -Eq "FileNotFoundError:.*miniwdl_call_cache.*[.]json" "${attempt_log}"
+}
+
+validate_output() {
+    "${install_root}/env/bin/python" - "${output_json}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.is_file() or path.stat().st_size == 0:
+    raise SystemExit(f"MiniWDL output is missing or empty: {path}")
+try:
+    with path.open(encoding="utf-8") as handle:
+        payload = json.load(handle)
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit(f"MiniWDL output is not valid JSON: {path}: {error}")
+if not isinstance(payload, dict):
+    raise SystemExit(f"MiniWDL output is not a JSON object: {path}")
+PY
+}
+
+for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    attempt_log="${run_dir%/}/longpipe-miniwdl-attempt-${attempt}.log"
+    echo "Longpipe MiniWDL attempt ${attempt}/${max_attempts}; attempt log: ${attempt_log}" >&2
+
+    set +e
+    "${miniwdl}" "$@" 2>&1 | tee "${attempt_log}"
+    status="${PIPESTATUS[0]}"
+    set -e
+
+    if [[ "${status}" -eq 0 ]]; then
+        validate_output
+        exit 0
+    fi
+    if ! is_cache_race "${attempt_log}"; then
+        echo "MiniWDL failure does not match the transient call-cache race; not retrying." >&2
+        exit "${status}"
+    fi
+    if [[ "${attempt}" -eq "${max_attempts}" ]]; then
+        echo "MiniWDL call-cache race persisted through all attempts." >&2
+        exit "${status}"
+    fi
+
+    echo "Detected transient MiniWDL call-cache race; retrying after ${backoff_seconds} seconds." >&2
+    sleep "${backoff_seconds}"
+done
+
+exit 1

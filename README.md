@@ -107,6 +107,18 @@ uses a shared engine and site configuration while keeping call and Singularity
 caches below the configured Longpipe scratch root. Set `MINIWDL_CACHE_ROOT` to
 use a different persistent cache location.
 
+Longpipe retries a MiniWDL invocation once when its log matches the known
+call-cache coherence `FileNotFoundError` race. Other MiniWDL failures are not
+retried. The deployment wrapper retains each attempt below the sample's
+MiniWDL run directory as `longpipe-miniwdl-attempt-<n>.log`. This is a
+defensive workflow measure; the cache race should also be reported and
+corrected upstream in MiniWDL.
+
+The deployment wrapper is shipped under `share/longpipe/deploy/miniwdl` in
+the Longpipe installation. A Longpipe upgrade does not silently overwrite the
+shared MiniWDL deployment. Update its outer `bin/miniwdl` wrapper deliberately;
+the managed MiniWDL environment and cache contents do not need modification.
+
 Sawfish's `annotation_and_common_cnv` and sex-specific expected-copy-number
 BED files are reference inputs rather than software dependencies. Keep them in
 a shared, versioned reference directory matching the Sawfish version declared

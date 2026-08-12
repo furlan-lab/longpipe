@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "longpipe"
-version = "0.2.0"
+version = "0.2.1"
 description = "PacBio HiFi and Fiber-seq workflow runner"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -28,6 +28,7 @@ where = ["src"]
 [tool.setuptools.data-files]
 "share/longpipe" = ["Snakefile"]
 "share/longpipe/config" = ["config/*.csv", "config/*.yaml"]
+"share/longpipe/deploy/miniwdl" = ["deploy/miniwdl/*"]
 "share/longpipe/envs" = ["envs/*.yaml"]
 "share/longpipe/profiles/slurm" = ["profiles/slurm/*.yaml"]
 "share/longpipe/schemas" = ["schemas/*.yaml"]

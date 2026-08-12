@@ -17,12 +17,12 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSchemaTest(unittest.TestCase):
-    def test_release_version_is_0_2_0(self):
+    def test_release_version_is_0_2_1(self):
         project = tomllib.loads(
             (REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(project["project"]["version"], "0.2.0")
+        self.assertEqual(project["project"]["version"], "0.2.1")
 
     def test_runsheet_accepts_free_text_notes(self):
         from jsonschema import Draft202012Validator
@@ -175,6 +175,27 @@ class ConfigSchemaTest(unittest.TestCase):
         self.assertIn("numpy=1.24", dependencies)
         self.assertIn("pandas=1.4", dependencies)
         self.assertEqual(pip_dependencies, ["polars-lts-cpu==1.7.1"])
+
+    def test_fibertools_conda_environments_share_version(self):
+        fibertools_dependencies = {}
+        for environment_path in sorted((REPOSITORY_ROOT / "envs").glob("*.yaml")):
+            environment = yaml.safe_load(environment_path.read_text(encoding="utf-8"))
+            pins = [
+                dependency
+                for dependency in environment["dependencies"]
+                if isinstance(dependency, str)
+                and dependency.startswith("fibertools-rs=")
+            ]
+            if pins:
+                fibertools_dependencies[environment_path.name] = pins
+
+        self.assertEqual(
+            fibertools_dependencies,
+            {
+                "fibertools.yaml": ["fibertools-rs=0.12.0"],
+                "fire-core.yaml": ["fibertools-rs=0.12.0"],
+            },
+        )
 
     def test_shared_miniwdl_deployment_is_pinned(self):
         environment = yaml.safe_load(

@@ -4,5 +4,5 @@ channels:
   - nodefaults
 dependencies:
   - python=3.12
-  - fibertools-rs=0.9.0
+  - fibertools-rs=0.12.0
   - samtools=1.24
