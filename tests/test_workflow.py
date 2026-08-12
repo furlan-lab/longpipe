@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -16,6 +17,13 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSchemaTest(unittest.TestCase):
+    def test_release_version_is_0_2_0(self):
+        project = tomllib.loads(
+            (REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(project["project"]["version"], "0.2.0")
+
     def test_runsheet_accepts_free_text_notes(self):
         from jsonschema import Draft202012Validator
 
@@ -590,6 +598,118 @@ class WorkflowDagTest(unittest.TestCase):
                 with self.subTest(hia5=hia5):
                     self._dry_run(root, run_name, hia5)
 
+    def test_targeting_one_sample_publication_does_not_require_other_sample(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (
+                run_directory,
+                _,
+                inputs,
+                config_path,
+                environment,
+            ) = self._fixture(root, "independent-samples", "no")
+            (inputs / "second.bam").touch()
+            Path(environment["LONGPIPE_RUNSHEET"]).write_text(
+                "core_name,lab_name,run,cell,barcode,hifi_bam,input_stage,"
+                "pbwgs_outputs_json,sex,hia5,fiberseq_input\n"
+                "sample,,,,,inputs/sample.bam,raw,,F,no,auto\n"
+                "second,,,,,inputs/second.bam,raw,,F,no,auto\n",
+                encoding="utf-8",
+            )
+            target = str(
+                (
+                    run_directory
+                    / "run-metadata"
+                    / "sample-publication"
+                    / "sample.json"
+                ).resolve()
+            )
+            completed = self._run_dry_run(
+                run_directory,
+                config_path,
+                environment,
+                target=target,
+            )
+
+        self.assertIn("rule publish_sample_results", completed.stdout)
+        self.assertIn("wildcards: sample=sample", completed.stdout)
+        self.assertNotIn("second.bam", completed.stdout)
+        self.assertNotIn("wildcards: sample=second", completed.stdout)
+
+    def test_sample_publication_rule_executes_atomically(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (
+                run_directory,
+                scratch_directory,
+                _,
+                config_path,
+                environment,
+            ) = self._fixture(root, "publish-one", "no")
+
+            wgs = scratch_directory / "results" / "wgs" / "sample"
+            wgs.mkdir(parents=True)
+            bam = wgs / "sample.GRCh38.haplotagged.bam"
+            bam.write_text("bam\n", encoding="utf-8")
+            (wgs / "outputs.json").write_text(
+                json.dumps({"haplotagged_bam": str(bam.resolve())}),
+                encoding="utf-8",
+            )
+
+            sv = scratch_directory / "results" / "sv"
+            sv.mkdir(parents=True)
+            for suffix in (
+                ".sawfish.vcf.gz",
+                ".sawfish.vcf.gz.tbi",
+                ".supporting_reads.json.gz",
+            ):
+                (sv / f"sample{suffix}").write_text("sv\n", encoding="utf-8")
+            svtopo = sv / "sample.svtopo"
+            svtopo.mkdir()
+            (svtopo / "summary.tsv").write_text("svtopo\n", encoding="utf-8")
+
+            hla = scratch_directory / "results" / "hla"
+            hla.mkdir(parents=True)
+            for suffix in (
+                "_hifihla_report.json",
+                "_hifihla_report.tsv",
+                "_hifihla_summary.tsv",
+            ):
+                (hla / f"sample{suffix}").write_text("hla\n", encoding="utf-8")
+
+            target = (
+                run_directory
+                / "run-metadata"
+                / "sample-publication"
+                / "sample.json"
+            ).resolve()
+            completed = subprocess.run(
+                [
+                    "snakemake",
+                    str(target),
+                    "--snakefile",
+                    str(REPOSITORY_ROOT / "Snakefile"),
+                    "--configfile",
+                    str(config_path),
+                    "--cores",
+                    "1",
+                ],
+                cwd=run_directory,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stdout)
+            published = run_directory / "samples" / "sample" / "pbWGS"
+            manifest = json.loads((published / "outputs.json").read_text())
+            self.assertEqual(
+                Path(manifest["haplotagged_bam"]),
+                (published / "sample.GRCh38.haplotagged.bam").resolve(),
+            )
+            self.assertEqual(json.loads(target.read_text())["status"], "complete")
+
     def test_fiber_branch_starts_with_input_detection(self):
         with tempfile.TemporaryDirectory() as temporary:
             completed = self._dry_run(
@@ -837,25 +957,7 @@ fi
                 encoding="utf-8",
             )
 
-            eligibility_directory = scratch_directory / "intermediate" / "fire"
-            eligibility_directory.mkdir(parents=True)
-            (eligibility_directory / "eligibility.json").write_text(
-                json.dumps(
-                    {
-                        "minimum_mean_depth": 8.0,
-                        "eligible_samples": ["sample"],
-                        "samples": [],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            report = scratch_directory / "results" / "fire" / "eligibility.tsv"
-            report.parent.mkdir(parents=True)
-            report.write_text(
-                "sample\tmean_depth\tminimum_mean_depth\teligible\treason\n"
-                "sample\t20\t8\tyes\teligible\n",
-                encoding="utf-8",
-            )
+            self._write_eligibility(scratch_directory)
 
             completed = subprocess.run(
                 [
@@ -1083,21 +1185,24 @@ fi
             scratch_directory
             / "intermediate"
             / "fire"
-            / "eligibility.json"
+            / "eligibility"
+            / "sample.json"
         )
         manifest.parent.mkdir(parents=True)
         manifest.write_text(
             json.dumps(
                 {
+                    "sample": "sample",
+                    "mean_depth": 20.0,
                     "minimum_mean_depth": 8.0,
-                    "eligible_samples": ["sample"],
-                    "samples": [],
+                    "eligible": True,
+                    "reason": "eligible",
                 }
             ),
             encoding="utf-8",
         )
-        report = scratch_directory / "results" / "fire" / "eligibility.tsv"
-        report.parent.mkdir(parents=True)
+        report = manifest.with_suffix(".tsv")
+        report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text(
             "sample\tmean_depth\tminimum_mean_depth\teligible\treason\n"
             "sample\t20\t8\tyes\teligible\n",
@@ -1196,7 +1301,7 @@ fi
             else:
                 self.assertNotIn("checkpoint detect_fiberseq_input", completed.stdout)
         else:
-            self.assertIn("checkpoint fire_eligibility", completed.stdout)
+            self.assertNotIn("checkpoint fire_eligibility", completed.stdout)
             self.assertNotIn("checkpoint detect_fiberseq_input", completed.stdout)
             self.assertNotIn("rule add_nucleosomes", completed.stdout)
             self.assertNotIn("rule predict_m6a", completed.stdout)

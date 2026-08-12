@@ -379,7 +379,9 @@ restarting the same scratch path.
 
 ## Published Data
 
-After a successful workflow, Longpipe stages and publishes:
+Each sample follows its own Snakemake trajectory. As soon as all outputs for
+one sample are complete, Longpipe atomically publishes that sample without
+waiting for other samples in the run:
 
 ```text
 260410_BT-brain/
@@ -405,7 +407,11 @@ After a successful workflow, Longpipe stages and publishes:
 ├── logs/
 ├── benchmarks/
 └── run-metadata/
-    └── fire-eligibility.tsv
+    ├── fire-eligibility.tsv
+    ├── sample-publication/
+    │   └── <sample>.json
+    └── fire-publication/
+        └── <sample>.json
 ```
 
 The `fire/` directory is present only for samples that enter the Fiber-seq
@@ -415,10 +421,9 @@ haplotype difference table contains H1/H2 coverage, percent accessibility,
 percentage-point difference, odds ratio, raw p-value, adjusted q-value, and a
 significance flag; its companion summary records filtering and test counts.
 Scratch paths retain the workflow's internal `results/{wgs,fire,sv,hla}`
-layout so existing work can resume; Longpipe performs the per-sample
-transformation only when publishing a successful run. A successful full
-publication removes the superseded durable `results/` tree from older Longpipe
-versions.
+layout so existing work can resume. Longpipe performs the layout transformation
+independently when each sample reaches its publication rule. A successful full
+run removes the superseded durable `results/` tree from older Longpipe versions.
 
 `run-metadata/` contains the latest status and versioned invocation records
 with the exact configuration, runsheet, and selected Snakemake metadata used
@@ -426,10 +431,16 @@ for each launch. `run-metadata/fiberseq-input/` records the BAM tag evidence
 and preparation action selected for every Fiber-seq sample.
 `run-metadata/reanalysis-input/` records validation and provenance for every
 `aligned` or `pbwgs` input.
+`run-metadata/sample-publication/` records which full sample trees completed
+publication. FIRE-only runs record their independent sample-level updates in
+`run-metadata/fire-publication/`. The combined `fire-eligibility.tsv` is a
+run-level summary and is finalized after every Fiber-seq candidate has an
+eligibility decision; it does not gate an individual sample's analysis.
 
-On failure, Longpipe publishes logs, benchmarks, provenance, and failure status
-but does not publish partial scientific results. Scratch is retained after both
-success and failure.
+On failure, Longpipe publishes logs, benchmarks, provenance, and failure status.
+Any sample that already reached its atomic publication rule remains available
+as a complete sample result; incomplete samples are not published. Scratch is
+retained after both success and failure.
 
 Remove scratch explicitly after results have been checked if desired:
 

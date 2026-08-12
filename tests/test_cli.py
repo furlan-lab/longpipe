@@ -60,8 +60,12 @@ class LongpipeCliTest(unittest.TestCase):
 import csv
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(os.environ["LONGPIPE_WORKFLOW_ROOT"]) / "src"))
+from longpipe.publication import publish_fire_only, publish_sample
 
 scratch = Path(os.environ["LONGPIPE_SCRATCH_DIR"])
 fire_only = "fire_only" in sys.argv[1:]
@@ -118,6 +122,15 @@ fire.mkdir(parents=True, exist_ok=True)
     )
 )
 for sample in fire_samples:
+    eligibility = scratch / "intermediate" / "fire" / "eligibility"
+    eligibility.mkdir(parents=True, exist_ok=True)
+    (eligibility / f"{sample}.json").write_text(json.dumps({
+        "sample": sample,
+        "mean_depth": 20.0,
+        "minimum_mean_depth": 8.0,
+        "eligible": True,
+        "reason": "eligible",
+    }))
     pileups = fire / "pileups"
     pileups.mkdir(parents=True, exist_ok=True)
     (pileups / f"{sample}-fire-v0.1.2-pileup.bed.gz").write_text(
@@ -182,11 +195,69 @@ if not fire_only:
         (hla / f"{sample}_hifihla_report.json").write_text("{}\\n")
         (hla / f"{sample}_hifihla_report.tsv").write_text("hla\\n")
         (hla / f"{sample}_hifihla_summary.tsv").write_text("hla\\n")
-if os.environ.get("FAKE_LONGPIPE_UNEXPECTED") == "yes":
-    (results / "unrouted").mkdir(parents=True, exist_ok=True)
 if os.environ.get("FAKE_LONGPIPE_RESULT") == "failure":
     print("simulated workflow failure")
     sys.exit(7)
+
+run_directory = Path(os.environ["LONGPIPE_RUN_DIR"])
+invocation_id = os.environ.get("LONGPIPE_INVOCATION_ID", "")
+if os.environ.get("FAKE_LONGPIPE_UNEXPECTED") == "yes" and len(samples) > 1:
+    (
+        results / "hla" / f"{samples[1]}_hifihla_report.json"
+    ).unlink(missing_ok=True)
+
+if fire_only:
+    for sample in fire_samples:
+        publish_fire_only(
+            sample=sample,
+            scratch_directory=scratch,
+            run_directory=run_directory,
+            status_path=(
+                run_directory
+                / "run-metadata"
+                / "fire-publication"
+                / f"{sample}.json"
+            ),
+            fire_version="v0.1.2",
+            fire_decision_path=(
+                scratch
+                / "intermediate"
+                / "fire"
+                / "eligibility"
+                / f"{sample}.json"
+            ),
+            invocation_id=invocation_id,
+        )
+else:
+    for sample in samples:
+        decision = (
+            scratch
+            / "intermediate"
+            / "fire"
+            / "eligibility"
+            / f"{sample}.json"
+        )
+        publish_sample(
+            sample=sample,
+            scratch_directory=scratch,
+            run_directory=run_directory,
+            status_path=(
+                run_directory
+                / "run-metadata"
+                / "sample-publication"
+                / f"{sample}.json"
+            ),
+            fire_version="v0.1.2",
+            peak_sets=("brain_atac", "marrow_atac"),
+            fire_decision_path=decision if sample in fire_samples else None,
+            invocation_id=invocation_id,
+        )
+
+(run_directory / "run-metadata").mkdir(parents=True, exist_ok=True)
+shutil.copy2(
+    fire / "eligibility.tsv",
+    run_directory / "run-metadata" / "fire-eligibility.tsv",
+)
 print("simulated workflow success")
 """,
             encoding="utf-8",
@@ -545,6 +616,16 @@ exit 127
         self.assertTrue(
             (run_directory / "run-metadata" / "fire-eligibility.tsv").is_file()
         )
+        sample_publication = json.loads(
+            (
+                run_directory
+                / "run-metadata"
+                / "sample-publication"
+                / f"{sample}.json"
+            ).read_text()
+        )
+        self.assertEqual(sample_publication["status"], "complete")
+        self.assertEqual(sample_publication["mode"], "full")
         self.assertTrue(
             (
                 run_directory
@@ -718,6 +799,16 @@ exit 127
             status["command"].index("--configfile"),
         )
         self.assertEqual(status["status"], "success")
+        fire_publication = json.loads(
+            (
+                run_directory
+                / "run-metadata"
+                / "fire-publication"
+                / f"{sample}.json"
+            ).read_text()
+        )
+        self.assertEqual(fire_publication["status"], "complete")
+        self.assertEqual(fire_publication["mode"], "fire_only")
 
     def test_reanalysis_validation_metadata_is_published(self):
         run_directory = self.setup_run(self.work_one, "reanalysis-run")
@@ -824,7 +915,7 @@ exit 127
             ).is_dir()
         )
 
-    def test_publication_failure_preserves_previous_sample_tree(self):
+    def test_completed_sample_publishes_when_another_sample_fails(self):
         run_directory = self.setup_run(self.work_one, "publication-run")
         arguments = self.run_arguments("publication-run")
         with working_directory(self.work_one):
@@ -844,13 +935,23 @@ exit 127
             FAKE_LONGPIPE_UNEXPECTED="yes"
         ):
             result, _, error = self.invoke(arguments)
-        self.assertEqual(result, 2)
-        self.assertIn("publication failed", error)
-        self.assertEqual(pileup.read_text(), "invocation 1\n")
+        self.assertEqual(result, 1)
+        self.assertIn("Run failed with exit code 1", error)
+        self.assertEqual(pileup.read_text(), "invocation 2\n")
+        self.assertEqual(
+            (
+                run_directory
+                / "samples"
+                / "BT54"
+                / "pbWGS"
+                / "BT54.bam"
+            ).read_text(),
+            "invocation 1\n",
+        )
         status = json.loads(
             (run_directory / "run-metadata" / "status.json").read_text()
         )
-        self.assertEqual(status["status"], "publication_failed")
+        self.assertEqual(status["status"], "failed")
 
     def test_scratch_ownership_prevents_cross_project_collision(self):
         self.setup_run(self.work_one, "shared-name")

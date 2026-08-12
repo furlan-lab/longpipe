@@ -142,8 +142,24 @@ FIRE_HAPLOTYPE_SUMMARY = (
     f"results/fire/haplotypes/differences/"
     f"{{sample}}-fire-{FIRE_VERSION}-haplotype-differences-summary.tsv"
 )
-FIRE_ELIGIBILITY = "intermediate/fire/eligibility.json"
+FIRE_ELIGIBILITY = "intermediate/fire/eligibility/{sample}.json"
+FIRE_ELIGIBILITY_ROW = "intermediate/fire/eligibility/{sample}.tsv"
 FIRE_ELIGIBILITY_REPORT = "results/fire/eligibility.tsv"
+PUBLISHED_FIRE_ELIGIBILITY_REPORT = str(
+    RUN_DIRECTORY / "run-metadata" / "fire-eligibility.tsv"
+)
+SAMPLE_PUBLICATION_STATUS = str(
+    RUN_DIRECTORY
+    / "run-metadata"
+    / "sample-publication"
+    / "{sample}.json"
+)
+FIRE_PUBLICATION_STATUS = str(
+    RUN_DIRECTORY
+    / "run-metadata"
+    / "fire-publication"
+    / "{sample}.json"
+)
 FIBERSEQ_DETECTION_REPORT = (
     "intermediate/fiberseq/input-detection/{sample}.json"
 )
@@ -154,6 +170,7 @@ PBWGS_OUTPUTS = "pbWGS/{sample}/outputs.json"
 HAPLOTAGGED_BAM = (
     "results/wgs/{sample}/{sample}.GRCh38.haplotagged.bam"
 )
+PUBLISHED_WGS_MANIFEST = "results/wgs/{sample}/outputs.json"
 HAPLOTAGGED_BAM_INDEX = f"{HAPLOTAGGED_BAM}.bai"
 FIRE_INPUT_BAM = "intermediate/fire/input/{sample}.bam"
 FIRE_INPUT_BAM_INDEX = f"{FIRE_INPUT_BAM}.bai"
@@ -461,17 +478,6 @@ if len(svtopo_prefixes) != len(set(svtopo_prefixes)):
     )
 
 FIRE_CANDIDATES = [sample for sample in SAMPLES if uses_fiberseq(sample)]
-FIBERSEQ_DETECTION_REPORTS = expand(
-    FIBERSEQ_DETECTION_REPORT,
-    sample=FIRE_CANDIDATES,
-)
-REANALYSIS_SAMPLES = [
-    sample for sample in SAMPLES if input_stage_of(sample) != "raw"
-]
-REANALYSIS_VALIDATION_REPORTS = expand(
-    REANALYSIS_VALIDATION_REPORT,
-    sample=REANALYSIS_SAMPLES,
-)
 
 
 def load_fire_chromosomes():
@@ -531,17 +537,29 @@ FIRE_CHROM_PATTERN = (
 
 
 def fire_eligibility_checkpoint(wildcards):
-    return checkpoints.fire_eligibility.get()
+    return checkpoints.fire_eligibility.get(sample=wildcards.sample)
 
 
-def eligible_fire_samples(wildcards):
+def fire_eligible(wildcards):
     checkpoint_output = fire_eligibility_checkpoint(wildcards)
     with open(checkpoint_output.output.manifest, encoding="utf-8") as handle:
-        return json.load(handle)["eligible_samples"]
+        decision = json.load(handle)
+    if decision.get("sample") != wildcards.sample:
+        raise ValueError(
+            f"{checkpoint_output.output.manifest}: FIRE eligibility sample does "
+            f"not match {wildcards.sample}"
+        )
+    eligible = decision.get("eligible")
+    if not isinstance(eligible, bool):
+        raise ValueError(
+            f"{checkpoint_output.output.manifest}: FIRE eligibility decision "
+            "must be boolean"
+        )
+    return eligible
 
 
 def eligible_fire_bam(wildcards):
-    if wildcards.sample not in eligible_fire_samples(wildcards):
+    if not fire_eligible(wildcards):
         raise ValueError(
             f"{wildcards.sample}: FIRE requires mean depth >= "
             f"{FIRE_MIN_MEAN_DEPTH:g}"
@@ -549,51 +567,69 @@ def eligible_fire_bam(wildcards):
     return FIRE_INPUT_BAM.format(sample=wildcards.sample)
 
 
+def fire_core_outputs(sample):
+    return (
+        expand(FIRE_PILEUP, sample=sample)
+        + expand(FIRE_PILEUP_INDEX, sample=sample)
+        + expand(FIRE_BIGWIG, sample=sample)
+        + expand(FIRE_H1_BIGWIG, sample=sample)
+        + expand(FIRE_H2_BIGWIG, sample=sample)
+        + expand(FIRE_HAPLOTYPE_DIFFERENCE_BIGWIG, sample=sample)
+        + expand(FIRE_HAPLOTYPE_DIFFERENCES, sample=sample)
+        + expand(FIRE_HAPLOTYPE_DIFFERENCES_INDEX, sample=sample)
+        + expand(FIRE_HAPLOTYPE_SUMMARY, sample=sample)
+    )
+
+
 def fire_core_targets(wildcards):
     checkpoint_output = fire_eligibility_checkpoint(wildcards)
-    samples = eligible_fire_samples(wildcards)
-    return (
-        [checkpoint_output.output.report]
-        + expand(FIRE_PILEUP, sample=samples)
-        + expand(FIRE_PILEUP_INDEX, sample=samples)
-        + expand(FIRE_BIGWIG, sample=samples)
-        + expand(FIRE_H1_BIGWIG, sample=samples)
-        + expand(FIRE_H2_BIGWIG, sample=samples)
-        + expand(FIRE_HAPLOTYPE_DIFFERENCE_BIGWIG, sample=samples)
-        + expand(FIRE_HAPLOTYPE_DIFFERENCES, sample=samples)
-        + expand(FIRE_HAPLOTYPE_DIFFERENCES_INDEX, sample=samples)
-        + expand(FIRE_HAPLOTYPE_SUMMARY, sample=samples)
-    )
+    targets = [
+        checkpoint_output.output.manifest,
+        checkpoint_output.output.report,
+    ]
+    if fire_eligible(wildcards):
+        targets.extend(fire_core_outputs(wildcards.sample))
+    return targets
 
 
 def fire_targets(wildcards):
-    samples = eligible_fire_samples(wildcards)
-    return (
-        fire_core_targets(wildcards)
-        + expand(
-            "results/fire/ccre/{peak_set}/{sample}_scATAC_max_scores.bed",
-            sample=samples,
-            peak_set=CCRE_PEAK_SETS,
+    targets = fire_core_targets(wildcards)
+    if fire_eligible(wildcards):
+        targets.extend(
+            expand(
+                "results/fire/ccre/{peak_set}/{sample}_scATAC_max_scores.bed",
+                sample=wildcards.sample,
+                peak_set=CCRE_PEAK_SETS,
+            )
         )
-        + expand(
-            "results/fire/ccre/{peak_set}/{sample}_scATAC_median_scores.bed",
-            sample=samples,
-            peak_set=CCRE_PEAK_SETS,
+        targets.extend(
+            expand(
+                "results/fire/ccre/{peak_set}/{sample}_scATAC_median_scores.bed",
+                sample=wildcards.sample,
+                peak_set=CCRE_PEAK_SETS,
+            )
         )
-        + expand(
-            "results/fire/ccre/{peak_set}/{sample}_scATAC_sum_scores.bed",
-            sample=samples,
-            peak_set=CCRE_PEAK_SETS,
+        targets.extend(
+            expand(
+                "results/fire/ccre/{peak_set}/{sample}_scATAC_sum_scores.bed",
+                sample=wildcards.sample,
+                peak_set=CCRE_PEAK_SETS,
+            )
         )
-    )
+    return targets
 
 
-SV_TARGETS = (
-    expand("results/sv/{sample}.sawfish.vcf.gz", sample=SAMPLES)
-    + expand("results/sv/{sample}.sawfish.vcf.gz.tbi", sample=SAMPLES)
-    + expand("results/sv/{sample}.svtopo", sample=SAMPLES)
-)
-HLA_TARGETS = expand(HLA_JSON, sample=SAMPLES)
+def sample_fire_publication_inputs(wildcards):
+    if wildcards.sample not in FIRE_CANDIDATES:
+        return []
+    return fire_targets(wildcards)
+
+
+def fire_eligibility_rows(wildcards):
+    return [
+        checkpoints.fire_eligibility.get(sample=sample).output.report
+        for sample in FIRE_CANDIDATES
+    ]
 
 
 workdir: OUTDIR
@@ -606,24 +642,88 @@ wildcard_constraints:
     peak_set="[A-Za-z0-9][A-Za-z0-9._-]*",
     fire_chrom=FIRE_CHROM_PATTERN
 
-localrules: all, fire_only, wdl_input, hifi_wgs, fire_eligibility
+localrules: all, fire_only, fire_eligibility_report, wdl_input, hifi_wgs, \
+    fire_eligibility
 
 
 rule fire_only:
     input:
-        reanalysis_validation=REANALYSIS_VALIDATION_REPORTS,
-        fiberseq_detection=FIBERSEQ_DETECTION_REPORTS,
-        fire=fire_core_targets
+        samples=expand(FIRE_PUBLICATION_STATUS, sample=FIRE_CANDIDATES),
+        eligibility=PUBLISHED_FIRE_ELIGIBILITY_REPORT
 
 
 rule all:
     default_target: True
     input:
-        reanalysis_validation=REANALYSIS_VALIDATION_REPORTS,
-        fiberseq_detection=FIBERSEQ_DETECTION_REPORTS,
-        fire=fire_targets,
-        sv=SV_TARGETS,
-        hla=HLA_TARGETS
+        samples=expand(SAMPLE_PUBLICATION_STATUS, sample=SAMPLES),
+        eligibility=PUBLISHED_FIRE_ELIGIBILITY_REPORT
+
+
+rule publish_sample_results:
+    input:
+        wgs_bam=HAPLOTAGGED_BAM,
+        wgs_manifest=PUBLISHED_WGS_MANIFEST,
+        fire=sample_fire_publication_inputs,
+        sawfish_vcf="results/sv/{sample}.sawfish.vcf.gz",
+        sawfish_index="results/sv/{sample}.sawfish.vcf.gz.tbi",
+        sawfish_reads="results/sv/{sample}.supporting_reads.json.gz",
+        svtopo="results/sv/{sample}.svtopo",
+        hla_json=HLA_JSON,
+        hla_report=HLA_REPORT,
+        hla_summary=HLA_SUMMARY
+    output:
+        status=SAMPLE_PUBLICATION_STATUS
+    threads: 1
+    resources:
+        mem_mb=4000,
+        runtime=240,
+        io_heavy=1
+    params:
+        mode="full",
+        scratch_directory=OUTDIR,
+        run_directory=str(RUN_DIRECTORY),
+        fire_version=FIRE_VERSION,
+        peak_sets=CCRE_PEAK_SETS,
+        fire_decision=lambda wildcards: (
+            FIRE_ELIGIBILITY.format(sample=wildcards.sample)
+            if wildcards.sample in FIRE_CANDIDATES
+            else ""
+        ),
+        invocation_id=os.environ.get("LONGPIPE_INVOCATION_ID", "")
+    log:
+        "logs/publish_sample_results/{sample}.log"
+    benchmark:
+        "benchmarks/publish_sample_results/{sample}.tsv"
+    script:
+        "workflow/scripts/publish_sample.py"
+
+
+rule publish_fire_sample:
+    input:
+        fire_core_targets
+    output:
+        status=FIRE_PUBLICATION_STATUS
+    threads: 1
+    resources:
+        mem_mb=4000,
+        runtime=120,
+        io_heavy=1
+    params:
+        mode="fire_only",
+        scratch_directory=OUTDIR,
+        run_directory=str(RUN_DIRECTORY),
+        fire_version=FIRE_VERSION,
+        peak_sets=[],
+        fire_decision=lambda wildcards: FIRE_ELIGIBILITY.format(
+            sample=wildcards.sample
+        ),
+        invocation_id=os.environ.get("LONGPIPE_INVOCATION_ID", "")
+    log:
+        "logs/publish_fire_sample/{sample}.log"
+    benchmark:
+        "benchmarks/publish_fire_sample/{sample}.tsv"
+    script:
+        "workflow/scripts/publish_sample.py"
 
 
 rule validate_reanalysis_input:
@@ -827,75 +927,94 @@ rule hifi_wgs:
 
 checkpoint fire_eligibility:
     input:
-        manifests=lambda wildcards: [
-            pbwgs_outputs_for_sample(sample) for sample in FIRE_CANDIDATES
-        ],
-        validation=REANALYSIS_VALIDATION_REPORTS
+        manifest=lambda wildcards: pbwgs_outputs_for_sample(
+            wildcards.sample
+        ),
+        validation=reanalysis_validation_input
     output:
         manifest=FIRE_ELIGIBILITY,
-        report=FIRE_ELIGIBILITY_REPORT
+        report=FIRE_ELIGIBILITY_ROW
     params:
         minimum_mean_depth=FIRE_MIN_MEAN_DEPTH
     run:
         Path(output.manifest).parent.mkdir(parents=True, exist_ok=True)
         Path(output.report).parent.mkdir(parents=True, exist_ok=True)
-        decisions = []
-        eligible_samples = []
-        for sample, manifest_path in zip(FIRE_CANDIDATES, input.manifests):
-            with open(manifest_path, encoding="utf-8") as handle:
-                payload = json.load(handle)
-            outputs = payload.get("outputs", payload)
-            mean_depth = None
-            for output_key in FIRE_MEAN_DEPTH_OUTPUT_KEYS:
-                try:
-                    candidate = float(outputs[output_key])
-                except (KeyError, TypeError, ValueError):
-                    continue
-                if math.isfinite(candidate):
-                    mean_depth = candidate
-                    break
-            if mean_depth is None:
-                expected_keys = ", ".join(FIRE_MEAN_DEPTH_OUTPUT_KEYS)
-                raise ValueError(
-                    f"{sample}: {manifest_path} does not contain a valid "
-                    f"mean-depth output; expected one of: {expected_keys}"
-                )
-
-            if mean_depth < params.minimum_mean_depth:
-                eligible = False
-                reason = "below_minimum_mean_depth"
-            else:
-                eligible = True
-                reason = "eligible"
-                eligible_samples.append(sample)
-            decisions.append(
-                {
-                    "sample": sample,
-                    "mean_depth": mean_depth,
-                    "eligible": eligible,
-                    "reason": reason,
-                }
+        with open(input.manifest, encoding="utf-8") as handle:
+            payload = json.load(handle)
+        outputs = payload.get("outputs", payload)
+        mean_depth = None
+        for output_key in FIRE_MEAN_DEPTH_OUTPUT_KEYS:
+            try:
+                candidate = float(outputs[output_key])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if math.isfinite(candidate):
+                mean_depth = candidate
+                break
+        if mean_depth is None:
+            expected_keys = ", ".join(FIRE_MEAN_DEPTH_OUTPUT_KEYS)
+            raise ValueError(
+                f"{wildcards.sample}: {input.manifest} does not contain a "
+                f"valid mean-depth output; expected one of: {expected_keys}"
             )
 
-        eligibility = {
+        if mean_depth < params.minimum_mean_depth:
+            eligible = False
+            reason = "below_minimum_mean_depth"
+        else:
+            eligible = True
+            reason = "eligible"
+        decision = {
+            "sample": wildcards.sample,
+            "mean_depth": mean_depth,
             "minimum_mean_depth": params.minimum_mean_depth,
-            "eligible_samples": eligible_samples,
-            "samples": decisions,
+            "eligible": eligible,
+            "reason": reason,
         }
         with open(output.manifest, "w", encoding="utf-8") as handle:
-            json.dump(eligibility, handle, indent=2)
+            json.dump(decision, handle, indent=2)
             handle.write("\n")
         with open(output.report, "w", encoding="utf-8") as handle:
             handle.write(
                 "sample\tmean_depth\tminimum_mean_depth\teligible\treason\n"
             )
-            for decision in decisions:
-                handle.write(
-                    f"{decision['sample']}\t{decision['mean_depth']:g}\t"
-                    f"{params.minimum_mean_depth:g}\t"
-                    f"{'yes' if decision['eligible'] else 'no'}\t"
-                    f"{decision['reason']}\n"
+            handle.write(
+                f"{decision['sample']}\t{decision['mean_depth']:g}\t"
+                f"{params.minimum_mean_depth:g}\t"
+                f"{'yes' if decision['eligible'] else 'no'}\t"
+                f"{decision['reason']}\n"
+            )
+
+
+rule fire_eligibility_report:
+    input:
+        rows=fire_eligibility_rows
+    output:
+        scratch=FIRE_ELIGIBILITY_REPORT,
+        published=PUBLISHED_FIRE_ELIGIBILITY_REPORT
+    run:
+        header = (
+            "sample\tmean_depth\tminimum_mean_depth\teligible\treason\n"
+        )
+        lines = [header]
+        for row_path in input.rows:
+            row_lines = Path(row_path).read_text(encoding="utf-8").splitlines()
+            if not row_lines or f"{row_lines[0]}\n" != header:
+                raise ValueError(f"invalid FIRE eligibility row: {row_path}")
+            if len(row_lines) != 2:
+                raise ValueError(
+                    f"expected one FIRE eligibility decision in {row_path}"
                 )
+            lines.append(f"{row_lines[1]}\n")
+        report = "".join(lines)
+        for report_path in (output.scratch, output.published):
+            destination = Path(report_path)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_name(
+                f".{destination.name}.{os.getpid()}.tmp"
+            )
+            temporary.write_text(report, encoding="utf-8")
+            os.replace(temporary, destination)
 
 
 rule copy_pbwdl:
@@ -904,7 +1023,8 @@ rule copy_pbwdl:
         tool=COPY_PBWDL,
         validation=reanalysis_validation_input
     output:
-        HAPLOTAGGED_BAM
+        bam=HAPLOTAGGED_BAM,
+        manifest=PUBLISHED_WGS_MANIFEST
     threads: 8
     resources:
         mem_mb=32000,
@@ -923,7 +1043,8 @@ rule copy_pbwdl:
             -i {input.outputs:q} \
             -o {params.output_directory:q} \
             -t {threads} -m > {log:q} 2>&1
-        test -s {output:q}
+        test -s {output.bam:q}
+        test -s {output.manifest:q}
         """
 
 

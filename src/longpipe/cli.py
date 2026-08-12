@@ -949,6 +949,31 @@ def _publish_fire_only_results(
     )
 
 
+def _finalize_per_sample_publication(
+    run_directory: Path,
+    runsheet_snapshot: Path,
+    preserve_unselected: bool,
+) -> None:
+    """Remove obsolete legacy results after every selected sample published."""
+
+    if not preserve_unselected:
+        selected = set(_sample_labels(runsheet_snapshot))
+        durable_samples = run_directory / "samples"
+        if durable_samples.is_dir():
+            for entry in durable_samples.iterdir():
+                if entry.name not in selected:
+                    if entry.is_dir() and not entry.is_symlink():
+                        shutil.rmtree(entry)
+                    else:
+                        entry.unlink()
+
+    legacy_results = run_directory / "results"
+    if legacy_results.is_symlink() or legacy_results.is_file():
+        legacy_results.unlink()
+    elif legacy_results.is_dir():
+        shutil.rmtree(legacy_results)
+
+
 def _publish_snakemake_metadata(
     scratch_directory: Path, durable_invocation: Path
 ) -> None:
@@ -1422,7 +1447,7 @@ def _run(args: argparse.Namespace) -> int:
 
         status["finished_at"] = _now()
         status["return_code"] = return_code
-        status["status"] = "publishing" if return_code == 0 else "failed"
+        status["status"] = "finalizing" if return_code == 0 else "failed"
         _record_status(status, scratch_directory, run_directory, durable_invocation)
 
         try:
@@ -1435,20 +1460,10 @@ def _run(args: argparse.Namespace) -> int:
                 row_selection is not None,
             )
             if return_code == 0:
-                scratch_results = scratch_directory / "results"
-                if args.only_fire:
-                    _publish_fire_only_results(
-                        scratch_results,
+                if not args.only_fire:
+                    _finalize_per_sample_publication(
                         run_directory,
                         runsheet_snapshot,
-                        config,
-                    )
-                else:
-                    _publish_sample_results(
-                        scratch_results,
-                        run_directory,
-                        runsheet_snapshot,
-                        config,
                         preserve_unselected=row_selection is not None,
                     )
         except BaseException as error:
