@@ -162,7 +162,8 @@ rule fire_genome_bedgraph:
 
 rule fire_coverage:
     input:
-        bedgraph=rules.fire_genome_bedgraph.output.bedgraph
+        bedgraph=rules.fire_genome_bedgraph.output.bedgraph,
+        script=workflow.source_path("../scripts/fire_coverage.py")
     output:
         median=temp(FIRE_MEDIAN_COVERAGE),
         minimum=temp(FIRE_MINIMUM_COVERAGE),
@@ -176,7 +177,6 @@ rule fire_coverage:
     benchmark:
         "benchmarks/fire/coverage/{sample}.tsv"
     params:
-        script=workflow.source_path("../scripts/fire_coverage.py"),
         chromosomes=FIRE_CHROMS,
         coverage_within_n_sd=FIRE_COVERAGE_WITHIN_N_SD,
         min_coverage=FIRE_MIN_COVERAGE
@@ -189,7 +189,7 @@ rule fire_coverage:
         for chromosome in {params.chromosomes:q}; do
             chromosome_arguments+=(--chromosome "$chromosome")
         done
-        POLARS_MAX_THREADS={threads} python {params.script:q} \
+        POLARS_MAX_THREADS={threads} python {input.script:q} \
             --coverage-within-n-sd {params.coverage_within_n_sd} \
             --min-coverage {params.min_coverage} \
             "${{chromosome_arguments[@]}}" \
@@ -445,7 +445,8 @@ rule fire_fdr_table:
     input:
         shuffled=rules.fire_shuffled_pileup.output.bed,
         minimum=rules.fire_coverage.output.minimum,
-        maximum=rules.fire_coverage.output.maximum
+        maximum=rules.fire_coverage.output.maximum,
+        script=workflow.source_path("../scripts/fire_fdr_table.py")
     output:
         table=temp(FIRE_FDR_TABLE)
     threads: 11
@@ -456,8 +457,6 @@ rule fire_fdr_table:
         "logs/fire/fdr_table/{sample}.log"
     benchmark:
         "benchmarks/fire/fdr_table/{sample}.tsv"
-    params:
-        script=workflow.source_path("../scripts/fire_fdr_table.py")
     conda:
         "../../envs/fire-python.yaml"
     shell:
@@ -465,7 +464,7 @@ rule fire_fdr_table:
         mkdir -p "$(dirname {output.table:q})" "$(dirname {log:q})"
         minimum_coverage="$(cat {input.minimum:q})"
         maximum_coverage="$(cat {input.maximum:q})"
-        POLARS_MAX_THREADS={threads} python {params.script:q} -v 1 \
+        POLARS_MAX_THREADS={threads} python {input.script:q} -v 1 \
             {input.shuffled:q} \
             {output.table:q} \
             --max-cov "$maximum_coverage" \
@@ -510,7 +509,8 @@ rule fire_pileup_chromosome:
 rule fire_fdr_track_chromosome:
     input:
         pileup=rules.fire_pileup_chromosome.output.bed,
-        fdr_table=rules.fire_fdr_table.output.table
+        fdr_table=rules.fire_fdr_table.output.table,
+        script=workflow.source_path("../scripts/fire_fdr_table.py")
     output:
         bed=temp(FIRE_CHROMOSOME_FDR_TRACK)
     threads: 4
@@ -521,14 +521,12 @@ rule fire_fdr_track_chromosome:
         "logs/fire/fdr_track/{sample}.{fire_chrom}.log"
     benchmark:
         "benchmarks/fire/fdr_track/{sample}.{fire_chrom}.tsv"
-    params:
-        script=workflow.source_path("../scripts/fire_fdr_table.py")
     conda:
         "../../envs/fire-python.yaml"
     shell:
         """
         mkdir -p "$(dirname {output.bed:q})" "$(dirname {log:q})"
-        POLARS_MAX_THREADS={threads} python {params.script:q} -v 1 \
+        POLARS_MAX_THREADS={threads} python {input.script:q} -v 1 \
             --fdr-table {input.fdr_table:q} \
             {input.pileup:q} \
             {output.bed:q} \
@@ -585,7 +583,8 @@ rule fire_haplotype_tracks:
     input:
         pileup=FIRE_PILEUP,
         index=FIRE_PILEUP_INDEX,
-        chrom_sizes=CHROM_SIZES
+        chrom_sizes=CHROM_SIZES,
+        script=workflow.source_path("../scripts/fire_haplotype_tracks.py")
     output:
         h1=FIRE_H1_BIGWIG,
         h2=FIRE_H2_BIGWIG,
@@ -599,8 +598,6 @@ rule fire_haplotype_tracks:
         "logs/fire/haplotypes/{sample}.tracks.log"
     benchmark:
         "benchmarks/fire/haplotypes/{sample}.tracks.tsv"
-    params:
-        script=workflow.source_path("../scripts/fire_haplotype_tracks.py")
     conda:
         "../../envs/intervals.yaml"
     shell:
@@ -611,7 +608,7 @@ rule fire_haplotype_tracks:
         )"
         trap 'rm -rf "$temporary_directory"' EXIT
         (
-            python {params.script:q} \
+            python {input.script:q} \
                 {input.pileup:q} \
                 "$temporary_directory/H1.bedgraph" \
                 "$temporary_directory/H2.bedgraph" \
@@ -656,7 +653,8 @@ rule fire_haplotype_tracks:
 rule fire_haplotype_differences:
     input:
         pileup=FIRE_PILEUP,
-        index=FIRE_PILEUP_INDEX
+        index=FIRE_PILEUP_INDEX,
+        script=workflow.source_path("../scripts/fire_haplotype_differences.py")
     output:
         bed=FIRE_HAPLOTYPE_DIFFERENCES,
         index=FIRE_HAPLOTYPE_DIFFERENCES_INDEX,
@@ -670,7 +668,6 @@ rule fire_haplotype_differences:
     benchmark:
         "benchmarks/fire/haplotypes/{sample}.differences.tsv"
     params:
-        script=workflow.source_path("../scripts/fire_haplotype_differences.py"),
         minimum_coverage=FIRE_HAPLOTYPE_MIN_COVERAGE,
         maximum_fire_fdr=FIRE_HAPLOTYPE_MAX_FDR,
         qvalue_threshold=FIRE_HAPLOTYPE_QVALUE
@@ -684,7 +681,7 @@ rule fire_haplotype_differences:
         )"
         trap 'rm -f "$temporary_bed"' EXIT
         (
-            python {params.script:q} \
+            python {input.script:q} \
                 --minimum-coverage {params.minimum_coverage} \
                 --maximum-fire-fdr {params.maximum_fire_fdr} \
                 --qvalue-threshold {params.qvalue_threshold} \

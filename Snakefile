@@ -17,7 +17,6 @@ envvars:
     "LONGPIPE_RUNSHEET",
     "LONGPIPE_SCRATCH_DIR"
 
-WORKFLOW_ROOT = Path(str(workflow.source_path("Snakefile"))).resolve().parent
 CONFIG_SCHEMA = str(workflow.source_path("schemas/config.schema.yaml"))
 RUNSHEET_SCHEMA = str(workflow.source_path("schemas/runsheet.schema.yaml"))
 
@@ -729,7 +728,10 @@ rule publish_fire_sample:
 rule validate_reanalysis_input:
     input:
         bam=lambda wildcards: source_bam(wildcards.sample),
-        reference_index=f"{FASTA}.fai"
+        reference_index=f"{FASTA}.fai",
+        script=workflow.source_path(
+            "workflow/scripts/validate_reanalysis_input.py"
+        )
     output:
         report=REANALYSIS_VALIDATION_REPORT
     threads: 1
@@ -742,11 +744,6 @@ rule validate_reanalysis_input:
             existing_pbwgs(wildcards.sample)["manifest"]
             if input_stage_of(wildcards.sample) == "pbwgs"
             else ""
-        ),
-        script=str(
-            workflow.source_path(
-                "workflow/scripts/validate_reanalysis_input.py"
-            )
         )
     log:
         "logs/validate_reanalysis_input/{sample}.log"
@@ -759,7 +756,7 @@ rule validate_reanalysis_input:
         mkdir -p "$(dirname {output.report:q})" "$(dirname {log:q})"
         outputs_json={params.outputs_json:q}
         run_validator() {{
-            python {params.script:q} \
+            python {input.script:q} \
                 --input {input.bam:q} \
                 --output {output.report:q} \
                 --reference-index {input.reference_index:q} \
@@ -778,7 +775,10 @@ rule validate_reanalysis_input:
 checkpoint detect_fiberseq_input:
     input:
         bam=lambda wildcards: source_bam(wildcards.sample),
-        validation=reanalysis_validation_input
+        validation=reanalysis_validation_input,
+        script=workflow.source_path(
+            "workflow/scripts/detect_fiberseq_input.py"
+        )
     output:
         report=FIBERSEQ_DETECTION_REPORT
     threads: 1
@@ -788,12 +788,7 @@ checkpoint detect_fiberseq_input:
     params:
         mode=lambda wildcards: fiberseq_input_of(wildcards.sample),
         reads=FIBERSEQ_DETECTION_READS,
-        min_fraction=FIBERSEQ_DETECTION_MIN_FRACTION,
-        script=str(
-            workflow.source_path(
-                "workflow/scripts/detect_fiberseq_input.py"
-            )
-        )
+        min_fraction=FIBERSEQ_DETECTION_MIN_FRACTION
     log:
         "logs/detect_fiberseq_input/{sample}.log"
     benchmark:
@@ -803,7 +798,7 @@ checkpoint detect_fiberseq_input:
     shell:
         """
         mkdir -p "$(dirname {output.report:q})" "$(dirname {log:q})"
-        python {params.script:q} \
+        python {input.script:q} \
             --input {input.bam:q} \
             --output {output.report:q} \
             --sample {wildcards.sample:q} \

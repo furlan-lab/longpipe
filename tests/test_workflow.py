@@ -26,6 +26,18 @@ class ConfigSchemaTest(unittest.TestCase):
 
         self.assertEqual(project["project"]["version"], "0.2.3")
 
+    def test_cached_helper_scripts_are_rule_inputs(self):
+        workflow_sources = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (
+                REPOSITORY_ROOT / "Snakefile",
+                REPOSITORY_ROOT / "workflow" / "rules" / "fire.smk",
+            )
+        )
+
+        self.assertNotIn("{params.script", workflow_sources)
+        self.assertEqual(workflow_sources.count("{input.script:q}"), 7)
+
     def test_runsheet_accepts_free_text_notes(self):
         from jsonschema import Draft202012Validator
 
@@ -633,6 +645,65 @@ class WorkflowDagTest(unittest.TestCase):
             for run_name, hia5 in (("read-run", "no"), ("fiber-run", "yes")):
                 with self.subTest(hia5=hia5):
                     self._dry_run(root, run_name, hia5)
+
+    def test_cached_detector_path_does_not_break_resume(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (
+                run_directory,
+                scratch_directory,
+                inputs,
+                config_path,
+                environment,
+            ) = self._fixture(root, "detector-resume", "yes")
+            fake_samtools = inputs / "samtools"
+            fake_samtools.write_text(
+                "#!/bin/sh\n"
+                "printf 'read1\\t4\\t*\\t0\\t0\\t*\\t*\\t0\\t0\\tAAAA"
+                "\\tIIII\\tMM:Z:A+a,0;\\tML:B:C,255\\n'\n",
+                encoding="utf-8",
+            )
+            fake_samtools.chmod(0o755)
+            environment["PATH"] = f"{inputs}{os.pathsep}{environment['PATH']}"
+            target = (
+                scratch_directory
+                / "intermediate"
+                / "fiberseq"
+                / "input-detection"
+                / "sample.json"
+            )
+            command = [
+                "snakemake",
+                str(target.relative_to(scratch_directory)),
+                "--snakefile",
+                str(REPOSITORY_ROOT / "Snakefile"),
+                "--configfile",
+                str(config_path),
+                "--cores",
+                "1",
+            ]
+
+            first = subprocess.run(
+                command,
+                cwd=run_directory,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            self.assertEqual(first.returncode, 0, first.stdout)
+            resumed = subprocess.run(
+                [*command, "--dry-run"],
+                cwd=run_directory,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+
+        self.assertEqual(resumed.returncode, 0, resumed.stdout)
+        self.assertNotIn("checkpoint detect_fiberseq_input", resumed.stdout)
+        self.assertIn("Nothing to be done", resumed.stdout)
 
     def test_targeting_one_sample_publication_does_not_require_other_sample(self):
         with tempfile.TemporaryDirectory() as temporary:
