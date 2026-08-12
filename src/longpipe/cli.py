@@ -28,6 +28,20 @@ from . import __version__
 DEFAULT_PROJECT_ROOT = "/fh/fast/furlan_s/project"
 DEFAULT_SCRATCH_ROOT = "/hpc/temp/furlan_s"
 RUN_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+SETUP_RUNSHEET_COLUMNS = (
+    "core_name",
+    "lab_name",
+    "run",
+    "cell",
+    "barcode",
+    "hifi_bam",
+    "input_stage",
+    "pbwgs_outputs_json",
+    "sex",
+    "hia5",
+    "fiberseq_input",
+    "notes",
+)
 
 
 class LongpipeError(RuntimeError):
@@ -1335,6 +1349,18 @@ def _setup(args: argparse.Namespace) -> int:
     workflow_root = _workflow_root()
     config_template = workflow_root / "config" / "config.yaml"
     runsheet_template = workflow_root / "config" / "runsheet.csv"
+    try:
+        with runsheet_template.open(newline="", encoding="utf-8") as handle:
+            header = next(csv.reader(handle))
+    except (OSError, csv.Error, StopIteration) as error:
+        raise LongpipeError(
+            f"could not read packaged runsheet template {runsheet_template}: {error}"
+        ) from error
+    if tuple(header) != SETUP_RUNSHEET_COLUMNS:
+        raise LongpipeError(
+            "packaged runsheet template is obsolete or incompatible; expected "
+            f"{','.join(SETUP_RUNSHEET_COLUMNS)}, found {','.join(header)}"
+        )
     try:
         run_directory.mkdir()
         shutil.copy2(config_template, run_directory / "config.yaml")

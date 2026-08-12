@@ -497,7 +497,13 @@ exit 127
         self.assertIn("runsheet: runsheet.csv", config)
         self.assertNotIn("\nname:", config)
         self.assertNotIn("\noutdir:", config)
-        self.assertTrue((run_directory / "runsheet.csv").is_file())
+        with (run_directory / "runsheet.csv").open(newline="") as handle:
+            reader = csv.DictReader(handle)
+            rows = list(reader)
+        self.assertEqual(reader.fieldnames, list(cli.SETUP_RUNSHEET_COLUMNS))
+        self.assertEqual(rows[0]["input_stage"], "raw")
+        self.assertEqual(rows[0]["fiberseq_input"], "auto")
+        self.assertIn("notes", rows[0])
 
         with working_directory(self.work_one):
             result, _, error = self.invoke(
@@ -505,6 +511,30 @@ exit 127
             )
         self.assertEqual(result, 2)
         self.assertIn("already exists", error)
+
+    def test_setup_rejects_obsolete_packaged_runsheet(self):
+        workflow_root = self.root / "obsolete-workflow"
+        config_directory = workflow_root / "config"
+        config_directory.mkdir(parents=True)
+        (config_directory / "config.yaml").write_text(
+            "runsheet: runsheet.csv\n", encoding="utf-8"
+        )
+        (config_directory / "runsheet.csv").write_text(
+            "core_name,lab_name,run,cell,barcode,hifi_bam,sex,hia5\n",
+            encoding="utf-8",
+        )
+
+        with (
+            mock.patch.object(cli, "_workflow_root", return_value=workflow_root),
+            working_directory(self.work_one),
+        ):
+            result, _, error = self.invoke(
+                ["setup", "obsolete", "--project-root", str(self.project)]
+            )
+
+        self.assertEqual(result, 2)
+        self.assertIn("packaged runsheet template is obsolete", error)
+        self.assertFalse((self.work_one / "obsolete").exists())
 
     def test_setup_rejects_work_outside_project_root(self):
         outside = self.root / "outside"
