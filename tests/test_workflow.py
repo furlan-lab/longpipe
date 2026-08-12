@@ -19,12 +19,12 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 class ConfigSchemaTest(unittest.TestCase):
     FIBERTOOLS_VERSION = "0.12.0"
 
-    def test_release_version_is_0_2_2(self):
+    def test_release_version_is_0_2_3(self):
         project = tomllib.loads(
             (REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(project["project"]["version"], "0.2.2")
+        self.assertEqual(project["project"]["version"], "0.2.3")
 
     def test_runsheet_accepts_free_text_notes(self):
         from jsonschema import Draft202012Validator
