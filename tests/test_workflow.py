@@ -19,12 +19,12 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 class ConfigSchemaTest(unittest.TestCase):
     FIBERTOOLS_VERSION = "0.12.0"
 
-    def test_release_version_is_0_2_3(self):
+    def test_release_version_is_0_2_4(self):
         project = tomllib.loads(
             (REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(project["project"]["version"], "0.2.3")
+        self.assertEqual(project["project"]["version"], "0.2.4")
 
     def test_cached_helper_scripts_are_rule_inputs(self):
         workflow_sources = "\n".join(
