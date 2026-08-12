@@ -17,12 +17,14 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSchemaTest(unittest.TestCase):
-    def test_release_version_is_0_2_1(self):
+    FIBERTOOLS_VERSION = "0.12.0"
+
+    def test_release_version_is_0_2_2(self):
         project = tomllib.loads(
             (REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(project["project"]["version"], "0.2.1")
+        self.assertEqual(project["project"]["version"], "0.2.2")
 
     def test_runsheet_accepts_free_text_notes(self):
         from jsonschema import Draft202012Validator
@@ -192,10 +194,23 @@ class ConfigSchemaTest(unittest.TestCase):
         self.assertEqual(
             fibertools_dependencies,
             {
-                "fibertools.yaml": ["fibertools-rs=0.12.0"],
-                "fire-core.yaml": ["fibertools-rs=0.12.0"],
+                "fibertools.yaml": [
+                    f"fibertools-rs={self.FIBERTOOLS_VERSION}"
+                ],
+                "fire-core.yaml": [
+                    f"fibertools-rs={self.FIBERTOOLS_VERSION}"
+                ],
             },
         )
+
+        fire_core = yaml.safe_load(
+            (REPOSITORY_ROOT / "envs" / "fire-core.yaml").read_text(
+                encoding="utf-8"
+            )
+        )["dependencies"]
+        self.assertIn("samtools=1.23.1", fire_core)
+        self.assertIn("htslib=1.23.1", fire_core)
+        self.assertIn("mosdepth=0.3.7", fire_core)
 
     def test_shared_miniwdl_deployment_is_pinned(self):
         environment = yaml.safe_load(

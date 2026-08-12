@@ -32,6 +32,11 @@ The executable has this embedded `RUNPATH`:
 No existing Fibertools binary, LibTorch installation, Conda environment, or
 module-managed software was replaced.
 
+Longpipe uses fibertools-rs `0.12.0` as its shared compatibility version. The
+CPU Bioconda environments in `envs/fibertools.yaml` and `envs/fire-core.yaml`
+use the same release as this optional GPU build, so BAMs carrying current `MA`
+nucleosome/MSP annotations remain compatible through FIRE calling and pileup.
+
 ## Build Recipe
 
 The source checkout was placed at the official `v0.12.0` release tag. LibTorch

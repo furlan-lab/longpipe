@@ -59,6 +59,13 @@ bedtools, pbtk, Sawfish, and SVTopo. A working `conda` executable must
 therefore be available on the submit and compute nodes, but no Longpipe Conda
 environment needs to be activated for standard m6A-tagged inputs.
 
+Longpipe pins fibertools-rs `0.12.0` in both `envs/fibertools.yaml` and
+`envs/fire-core.yaml`. Keeping prediction, nucleosome annotation, FIRE
+calling, extraction, and pileup on one Fibertools release ensures that FIRE
+reads the current `MA` nucleosome/MSP representation. The FIRE environment
+also pins Samtools and HTSlib `1.23.1`; Mosdepth `0.3.7` requires HTSlib below
+1.24, while fibertools-rs `0.12.0` requires the newer `libzlib` stack.
+
 Kinetics inputs use `ft predict-m6a`. The portable default runs the pinned
 Bioconda build on CPUs because Bioconda does not include libtorch or GPU
 acceleration. This fallback requires no separate Fibertools installation, but
