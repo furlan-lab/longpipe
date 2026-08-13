@@ -163,7 +163,7 @@ rule fire_genome_bedgraph:
 rule fire_coverage:
     input:
         bedgraph=rules.fire_genome_bedgraph.output.bedgraph,
-        script=workflow.source_path("../scripts/fire_coverage.py")
+        script=FIRE_COVERAGE_SCRIPT
     output:
         median=temp(FIRE_MEDIAN_COVERAGE),
         minimum=temp(FIRE_MINIMUM_COVERAGE),
@@ -177,6 +177,7 @@ rule fire_coverage:
     benchmark:
         "benchmarks/fire/coverage/{sample}.tsv"
     params:
+        script_sha256=FIRE_COVERAGE_SCRIPT_SHA256,
         chromosomes=FIRE_CHROMS,
         coverage_within_n_sd=FIRE_COVERAGE_WITHIN_N_SD,
         min_coverage=FIRE_MIN_COVERAGE
@@ -446,7 +447,7 @@ rule fire_fdr_table:
         shuffled=rules.fire_shuffled_pileup.output.bed,
         minimum=rules.fire_coverage.output.minimum,
         maximum=rules.fire_coverage.output.maximum,
-        script=workflow.source_path("../scripts/fire_fdr_table.py")
+        script=FIRE_FDR_TABLE_SCRIPT
     output:
         table=temp(FIRE_FDR_TABLE)
     threads: 11
@@ -457,6 +458,8 @@ rule fire_fdr_table:
         "logs/fire/fdr_table/{sample}.log"
     benchmark:
         "benchmarks/fire/fdr_table/{sample}.tsv"
+    params:
+        script_sha256=FIRE_FDR_TABLE_SCRIPT_SHA256
     conda:
         "../../envs/fire-python.yaml"
     shell:
@@ -510,7 +513,7 @@ rule fire_fdr_track_chromosome:
     input:
         pileup=rules.fire_pileup_chromosome.output.bed,
         fdr_table=rules.fire_fdr_table.output.table,
-        script=workflow.source_path("../scripts/fire_fdr_table.py")
+        script=FIRE_FDR_TABLE_SCRIPT
     output:
         bed=temp(FIRE_CHROMOSOME_FDR_TRACK)
     threads: 4
@@ -521,6 +524,8 @@ rule fire_fdr_track_chromosome:
         "logs/fire/fdr_track/{sample}.{fire_chrom}.log"
     benchmark:
         "benchmarks/fire/fdr_track/{sample}.{fire_chrom}.tsv"
+    params:
+        script_sha256=FIRE_FDR_TABLE_SCRIPT_SHA256
     conda:
         "../../envs/fire-python.yaml"
     shell:
@@ -584,7 +589,7 @@ rule fire_haplotype_tracks:
         pileup=FIRE_PILEUP,
         index=FIRE_PILEUP_INDEX,
         chrom_sizes=CHROM_SIZES,
-        script=workflow.source_path("../scripts/fire_haplotype_tracks.py")
+        script=FIRE_HAPLOTYPE_TRACKS_SCRIPT
     output:
         h1=FIRE_H1_BIGWIG,
         h2=FIRE_H2_BIGWIG,
@@ -598,6 +603,8 @@ rule fire_haplotype_tracks:
         "logs/fire/haplotypes/{sample}.tracks.log"
     benchmark:
         "benchmarks/fire/haplotypes/{sample}.tracks.tsv"
+    params:
+        script_sha256=FIRE_HAPLOTYPE_TRACKS_SCRIPT_SHA256
     conda:
         "../../envs/intervals.yaml"
     shell:
@@ -654,7 +661,7 @@ rule fire_haplotype_differences:
     input:
         pileup=FIRE_PILEUP,
         index=FIRE_PILEUP_INDEX,
-        script=workflow.source_path("../scripts/fire_haplotype_differences.py")
+        script=FIRE_HAPLOTYPE_DIFFERENCES_SCRIPT
     output:
         bed=FIRE_HAPLOTYPE_DIFFERENCES,
         index=FIRE_HAPLOTYPE_DIFFERENCES_INDEX,
@@ -668,6 +675,7 @@ rule fire_haplotype_differences:
     benchmark:
         "benchmarks/fire/haplotypes/{sample}.differences.tsv"
     params:
+        script_sha256=FIRE_HAPLOTYPE_DIFFERENCES_SCRIPT_SHA256,
         minimum_coverage=FIRE_HAPLOTYPE_MIN_COVERAGE,
         maximum_fire_fdr=FIRE_HAPLOTYPE_MAX_FDR,
         qvalue_threshold=FIRE_HAPLOTYPE_QVALUE

@@ -1,4 +1,5 @@
 import glob
+import hashlib
 import json
 import math
 import os
@@ -19,6 +20,36 @@ envvars:
 
 CONFIG_SCHEMA = str(workflow.source_path("schemas/config.schema.yaml"))
 RUNSHEET_SCHEMA = str(workflow.source_path("schemas/runsheet.schema.yaml"))
+
+
+def tracked_script(path):
+    script = workflow.source_path(path)
+    digest = hashlib.sha256(Path(str(script)).read_bytes()).hexdigest()
+    return ancient(script), f"sha256:{digest}"
+
+
+(
+    VALIDATE_REANALYSIS_SCRIPT,
+    VALIDATE_REANALYSIS_SCRIPT_SHA256,
+) = tracked_script("workflow/scripts/validate_reanalysis_input.py")
+(
+    DETECT_FIBERSEQ_SCRIPT,
+    DETECT_FIBERSEQ_SCRIPT_SHA256,
+) = tracked_script("workflow/scripts/detect_fiberseq_input.py")
+(FIRE_COVERAGE_SCRIPT, FIRE_COVERAGE_SCRIPT_SHA256) = tracked_script(
+    "workflow/scripts/fire_coverage.py"
+)
+(FIRE_FDR_TABLE_SCRIPT, FIRE_FDR_TABLE_SCRIPT_SHA256) = tracked_script(
+    "workflow/scripts/fire_fdr_table.py"
+)
+(
+    FIRE_HAPLOTYPE_TRACKS_SCRIPT,
+    FIRE_HAPLOTYPE_TRACKS_SCRIPT_SHA256,
+) = tracked_script("workflow/scripts/fire_haplotype_tracks.py")
+(
+    FIRE_HAPLOTYPE_DIFFERENCES_SCRIPT,
+    FIRE_HAPLOTYPE_DIFFERENCES_SCRIPT_SHA256,
+) = tracked_script("workflow/scripts/fire_haplotype_differences.py")
 
 validate(config, CONFIG_SCHEMA)
 
@@ -729,9 +760,7 @@ rule validate_reanalysis_input:
     input:
         bam=lambda wildcards: source_bam(wildcards.sample),
         reference_index=f"{FASTA}.fai",
-        script=workflow.source_path(
-            "workflow/scripts/validate_reanalysis_input.py"
-        )
+        script=VALIDATE_REANALYSIS_SCRIPT
     output:
         report=REANALYSIS_VALIDATION_REPORT
     threads: 1
@@ -739,6 +768,7 @@ rule validate_reanalysis_input:
         mem_mb=4000,
         runtime=30
     params:
+        script_sha256=VALIDATE_REANALYSIS_SCRIPT_SHA256,
         stage=lambda wildcards: input_stage_of(wildcards.sample),
         outputs_json=lambda wildcards: (
             existing_pbwgs(wildcards.sample)["manifest"]
@@ -776,9 +806,7 @@ checkpoint detect_fiberseq_input:
     input:
         bam=lambda wildcards: source_bam(wildcards.sample),
         validation=reanalysis_validation_input,
-        script=workflow.source_path(
-            "workflow/scripts/detect_fiberseq_input.py"
-        )
+        script=DETECT_FIBERSEQ_SCRIPT
     output:
         report=FIBERSEQ_DETECTION_REPORT
     threads: 1
@@ -786,6 +814,7 @@ checkpoint detect_fiberseq_input:
         mem_mb=4000,
         runtime=30
     params:
+        script_sha256=DETECT_FIBERSEQ_SCRIPT_SHA256,
         mode=lambda wildcards: fiberseq_input_of(wildcards.sample),
         reads=FIBERSEQ_DETECTION_READS,
         min_fraction=FIBERSEQ_DETECTION_MIN_FRACTION

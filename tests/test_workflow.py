@@ -37,6 +37,8 @@ class ConfigSchemaTest(unittest.TestCase):
 
         self.assertNotIn("{params.script", workflow_sources)
         self.assertEqual(workflow_sources.count("{input.script:q}"), 7)
+        self.assertEqual(workflow_sources.count("script_sha256="), 7)
+        self.assertIn("return ancient(script)", workflow_sources)
 
     def test_runsheet_accepts_free_text_notes(self):
         from jsonschema import Draft202012Validator
@@ -646,9 +648,15 @@ class WorkflowDagTest(unittest.TestCase):
                 with self.subTest(hia5=hia5):
                     self._dry_run(root, run_name, hia5)
 
-    def test_cached_detector_path_does_not_break_resume(self):
+    def test_cached_detector_reinstall_does_not_break_resume(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            workflow_root = root / "workflow-source"
+            shutil.copytree(
+                REPOSITORY_ROOT,
+                workflow_root,
+                ignore=shutil.ignore_patterns(".git", ".pytest_cache"),
+            )
             (
                 run_directory,
                 scratch_directory,
@@ -676,7 +684,7 @@ class WorkflowDagTest(unittest.TestCase):
                 "snakemake",
                 str(target.relative_to(scratch_directory)),
                 "--snakefile",
-                str(REPOSITORY_ROOT / "Snakefile"),
+                str(workflow_root / "Snakefile"),
                 "--configfile",
                 str(config_path),
                 "--cores",
@@ -692,7 +700,24 @@ class WorkflowDagTest(unittest.TestCase):
                 stderr=subprocess.STDOUT,
             )
             self.assertEqual(first.returncode, 0, first.stdout)
+            detector = (
+                workflow_root
+                / "workflow"
+                / "scripts"
+                / "detect_fiberseq_input.py"
+            )
+            detector_contents = detector.read_bytes()
+            detector.write_bytes(detector_contents)
             resumed = subprocess.run(
+                [*command, "--dry-run"],
+                cwd=run_directory,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            detector.write_bytes(detector_contents + b"\n")
+            changed = subprocess.run(
                 [*command, "--dry-run"],
                 cwd=run_directory,
                 env=environment,
@@ -704,6 +729,9 @@ class WorkflowDagTest(unittest.TestCase):
         self.assertEqual(resumed.returncode, 0, resumed.stdout)
         self.assertNotIn("checkpoint detect_fiberseq_input", resumed.stdout)
         self.assertIn("Nothing to be done", resumed.stdout)
+        self.assertEqual(changed.returncode, 0, changed.stdout)
+        self.assertIn("checkpoint detect_fiberseq_input", changed.stdout)
+        self.assertIn("Params have changed", changed.stdout)
 
     def test_targeting_one_sample_publication_does_not_require_other_sample(self):
         with tempfile.TemporaryDirectory() as temporary:
