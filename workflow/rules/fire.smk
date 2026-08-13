@@ -396,7 +396,8 @@ rule fire_shuffled_pileup_chromosome:
         """
         mkdir -p "$(dirname {output.bed:q})" "$(dirname {log:q})"
         (
-            ft pileup {input.cram:q} {wildcards.fire_chrom:q} \
+            ft pileup {input.cram:q} \
+                --rgn {wildcards.fire_chrom:q} \
                 -t {threads} \
                 --fiber-coverage \
                 --shuffle {input.shuffled:q} \
@@ -501,7 +502,7 @@ rule fire_pileup_chromosome:
                 --haps \
                 --fiber-coverage \
                 {input.cram:q} \
-                {wildcards.fire_chrom:q} \
+                --rgn {wildcards.fire_chrom:q} \
                 | bgzip -@ {threads} \
                 > {output.bed:q}
         ) > {log:q} 2>&1

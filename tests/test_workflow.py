@@ -19,12 +19,12 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 class ConfigSchemaTest(unittest.TestCase):
     FIBERTOOLS_VERSION = "0.12.0"
 
-    def test_release_version_is_0_2_5(self):
+    def test_release_version_is_0_2_6(self):
         project = tomllib.loads(
             (REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(project["project"]["version"], "0.2.5")
+        self.assertEqual(project["project"]["version"], "0.2.6")
 
     def test_cached_helper_scripts_are_rule_inputs(self):
         workflow_sources = "\n".join(
@@ -1103,6 +1103,7 @@ fi
                     "--configfile",
                     str(config_path),
                     "--dry-run",
+                    "--printshellcmds",
                     "--cores",
                     "11",
                 ],
@@ -1142,6 +1143,8 @@ fi
                 rule_output = rule_output.split("\n[", 1)[0]
                 with self.subTest(indexed_rule=rule):
                     self.assertIn("filtered.cram.crai", rule_output)
+                    self.assertIn("ft pileup", rule_output)
+                    self.assertIn("--rgn chr1", rule_output)
             self.assertNotIn("pixi", completed.stdout.lower())
             self.assertNotIn("rule scatac_map", completed.stdout)
             self.assertNotIn("rule sawfish", completed.stdout)

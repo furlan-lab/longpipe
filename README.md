@@ -386,6 +386,19 @@ Changes to the durable files cannot affect an active invocation. A later
 `longpipe run` snapshots the current files and resumes the retained Snakemake
 state.
 
+Preview the exact workflow that Longpipe would resume without submitting jobs
+or publishing results:
+
+```bash
+longpipe run 260410_BT-brain --dry-run
+```
+
+The dry-run uses the normal configuration snapshot, run lock, scratch state,
+SLURM profile, target selection, and optional `--rows`/`--only-fire` filters.
+Its invocation and status are recorded under `run-metadata/`, but scientific
+results and diagnostics are not published. `--dry-run` cannot be combined with
+`--restart`, because a preview must not discard retained scratch state.
+
 To explicitly discard existing scratch state:
 
 ```bash

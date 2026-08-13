@@ -1128,8 +1128,9 @@ def _snakemake_command(
     workflow_root: Path,
     config_snapshot: Path,
     targets: Sequence[str] = (),
+    dry_run: bool = False,
 ) -> list[str]:
-    return [
+    command = [
         executable,
         *targets,
         "--snakefile",
@@ -1139,6 +1140,9 @@ def _snakemake_command(
         "--configfile",
         str(config_snapshot),
     ]
+    if dry_run:
+        command.append("--dry-run")
+    return command
 
 
 def _resolve_snakemake_executable(explicit: str | None) -> str:
@@ -1376,6 +1380,9 @@ def _setup(args: argparse.Namespace) -> int:
 
 
 def _run(args: argparse.Namespace) -> int:
+    if args.dry_run and args.restart:
+        raise LongpipeError("--dry-run cannot be combined with --restart")
+
     run_directory = _run_directory(args.project_root, args.run_name)
     if not run_directory.is_dir():
         raise LongpipeError(f"run directory does not exist: {run_directory}")
@@ -1426,9 +1433,11 @@ def _run(args: argparse.Namespace) -> int:
             workflow_root,
             config_snapshot,
             targets,
+            dry_run=args.dry_run,
         )
         status: dict[str, object] = {
             "command": command,
+            "dry_run": args.dry_run,
             "hostname": socket.gethostname(),
             "invocation_id": invocation_id,
             "pid": os.getpid(),
@@ -1437,7 +1446,7 @@ def _run(args: argparse.Namespace) -> int:
             "run_name": args.run_name,
             "scratch_directory": str(scratch_directory),
             "started_at": _now(),
-            "status": "running",
+            "status": "dry_run_running" if args.dry_run else "running",
             "ft_predict": ft_predict_runtime,
         }
         if row_selection is not None:
@@ -1459,7 +1468,8 @@ def _run(args: argparse.Namespace) -> int:
         mode_label = "FIRE only" if args.only_fire else "full workflow"
         if row_selection is not None:
             mode_label += f" for runsheet rows {args.rows}"
-        print(f"Running {mode_label} for {args.run_name!r} in {scratch_directory}")
+        action = "Dry-running" if args.dry_run else "Running"
+        print(f"{action} {mode_label} for {args.run_name!r} in {scratch_directory}")
         try:
             return_code = _stream_command(
                 command,
@@ -1473,6 +1483,29 @@ def _run(args: argparse.Namespace) -> int:
 
         status["finished_at"] = _now()
         status["return_code"] = return_code
+        if args.dry_run:
+            status["status"] = (
+                "dry_run_success" if return_code == 0 else "dry_run_failed"
+            )
+            _record_status(
+                status,
+                scratch_directory,
+                run_directory,
+                durable_invocation,
+            )
+            if return_code == 0:
+                print(
+                    "Dry-run completed; no jobs were submitted and no results "
+                    "were published."
+                )
+            else:
+                print(
+                    f"Dry-run failed with exit code {return_code}; no results "
+                    "were published.",
+                    file=sys.stderr,
+                )
+            return return_code
+
         status["status"] = "finalizing" if return_code == 0 else "failed"
         _record_status(status, scratch_directory, run_directory, durable_invocation)
 
@@ -1587,6 +1620,15 @@ def _parser() -> argparse.ArgumentParser:
         "--restart",
         action="store_true",
         help="discard this run's existing scratch state before starting",
+    )
+    run_parser.add_argument(
+        "-n",
+        "--dry-run",
+        action="store_true",
+        help=(
+            "preview the selected workflow without submitting jobs or publishing "
+            "results"
+        ),
     )
     run_parser.add_argument(
         "--only-fire",

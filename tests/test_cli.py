@@ -68,7 +68,12 @@ sys.path.insert(0, str(Path(os.environ["LONGPIPE_WORKFLOW_ROOT"]) / "src"))
 from longpipe.publication import publish_fire_only, publish_sample
 
 scratch = Path(os.environ["LONGPIPE_SCRATCH_DIR"])
+dry_run = "--dry-run" in sys.argv[1:]
 fire_only = "fire_only" in sys.argv[1:]
+if dry_run:
+    print("simulated dry-run")
+    sys.exit(0)
+
 (scratch / "logs" / "rules").mkdir(parents=True, exist_ok=True)
 (scratch / "logs" / "rules" / "fake.log").write_text("diagnostic\\n")
 (scratch / "benchmarks").mkdir(parents=True, exist_ok=True)
@@ -709,6 +714,64 @@ exit 127
         self.assertEqual(result, 0, error)
         self.assertFalse((self.scratch / "test-run").exists())
         self.assertTrue((run_directory / "samples").is_dir())
+
+    def test_dry_run_uses_snakemake_preview_without_publishing_results(self):
+        run_directory = self.setup_run(self.work_one, "dry-run")
+
+        with working_directory(self.work_one):
+            result, output, error = self.invoke(
+                self.run_arguments("dry-run") + ["--dry-run"]
+            )
+
+        self.assertEqual(result, 0, error)
+        self.assertIn("Dry-running full workflow", output)
+        self.assertIn(
+            "no jobs were submitted and no results were published",
+            output,
+        )
+        status = json.loads(
+            (run_directory / "run-metadata" / "status.json").read_text()
+        )
+        self.assertTrue(status["dry_run"])
+        self.assertEqual(status["mode"], "full")
+        self.assertEqual(status["status"], "dry_run_success")
+        self.assertEqual(status["return_code"], 0)
+        self.assertIn("--dry-run", status["command"])
+        self.assertFalse((run_directory / "samples").exists())
+        self.assertFalse(
+            (run_directory / "run-metadata" / "fire-eligibility.tsv").exists()
+        )
+        self.assertFalse((self.scratch / "dry-run" / "resume-counter").exists())
+        invocation = (
+            run_directory
+            / "run-metadata"
+            / "invocations"
+            / status["invocation_id"]
+        )
+        self.assertTrue((invocation / "config.yaml").is_file())
+        self.assertTrue((invocation / "runsheet.csv").is_file())
+        self.assertEqual(
+            json.loads((invocation / "status.json").read_text())["status"],
+            "dry_run_success",
+        )
+
+    def test_dry_run_rejects_restart_without_removing_scratch(self):
+        self.setup_run(self.work_one, "dry-restart")
+        arguments = self.run_arguments("dry-restart")
+        with working_directory(self.work_one):
+            result, _, error = self.invoke(arguments + ["--dry-run"])
+        self.assertEqual(result, 0, error)
+        owner = self.scratch / "dry-restart" / ".longpipe" / "owner.json"
+        before = owner.read_bytes()
+
+        with working_directory(self.work_one):
+            result, _, error = self.invoke(
+                arguments + ["--dry-run", "--restart"]
+            )
+
+        self.assertEqual(result, 2)
+        self.assertIn("--dry-run cannot be combined with --restart", error)
+        self.assertEqual(owner.read_bytes(), before)
 
     def test_rows_runs_filtered_snapshot_and_preserves_unselected_results(self):
         run_directory = self.setup_run(self.work_one, "selected-rows")
