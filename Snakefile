@@ -114,6 +114,11 @@ CCRE_PEAK_SETS = list(CCRE_PEAKS)
 REF_MAP = configured_path(config["ref_map_file"])
 TERTIARY_MAP = configured_path(config["tertiary_map_file"])
 WDL = configured_path(config["wdl_singleton"])
+MITORSAW_EXECUTABLE = (
+    configured_path(config["mitorsaw_executable"])
+    if "mitorsaw_executable" in config
+    else None
+)
 FIRE_EXCLUDE_REGIONS = [
     configured_path(path) for path in config["fire_exclude_regions"]
 ]
@@ -896,7 +901,8 @@ rule wdl_input:
         bam=wgs_hifi,
         ref_map=REF_MAP,
         tertiary_map=TERTIARY_MAP,
-        wdl=WDL
+        wdl=WDL,
+        mitorsaw=[MITORSAW_EXECUTABLE] if MITORSAW_EXECUTABLE else []
     output:
         "pbWGS/{sample}/input.json"
     run:
@@ -912,6 +918,10 @@ rule wdl_input:
             "humanwgs_singleton.backend": "HPC",
             "humanwgs_singleton.preemptible": config["wdl_preemptible"],
         }
+        if input.mitorsaw:
+            payload["humanwgs_singleton.mitorsaw_executable"] = str(
+                Path(input.mitorsaw[0]).resolve()
+            )
         with open(output[0], "w", encoding="utf-8") as output_handle:
             json.dump(payload, output_handle, indent=2)
             output_handle.write("\n")

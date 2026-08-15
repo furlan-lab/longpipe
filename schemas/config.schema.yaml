@@ -125,6 +125,9 @@ properties:
   wdl_singleton:
     type: string
     minLength: 1
+  mitorsaw_executable:
+    type: string
+    minLength: 1
   fire_exclude_regions:
     type: array
     minItems: 1
