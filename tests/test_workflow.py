@@ -755,6 +755,113 @@ class WorkflowDagTest(unittest.TestCase):
         self.assertIn("checkpoint detect_fiberseq_input", changed.stdout)
         self.assertIn("Params have changed", changed.stdout)
 
+    def test_cached_rust_sources_do_not_rebuild_unchanged_tools(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workflow_root = root / "workflow-source"
+            workflow_root.mkdir()
+            shutil.copy2(REPOSITORY_ROOT / "Snakefile", workflow_root)
+            for directory in (
+                "config", "envs", "profiles", "schemas", "tools", "workflow"
+            ):
+                shutil.copytree(
+                    REPOSITORY_ROOT / directory,
+                    workflow_root / directory,
+                    ignore=shutil.ignore_patterns(
+                        ".git", "__pycache__", "build", "target"
+                    ),
+                )
+            (
+                run_directory,
+                scratch_directory,
+                inputs,
+                config_path,
+                environment,
+            ) = self._fixture(root, "rust-tools-resume", "no")
+            cargo_calls = inputs / "cargo-calls.txt"
+            fake_cargo = inputs / "cargo"
+            fake_cargo.write_text(
+                "#!/bin/sh\n"
+                "set -eu\n"
+                "target_directory=\n"
+                "manifest=\n"
+                "while [ \"$#\" -gt 0 ]; do\n"
+                "    case \"$1\" in\n"
+                "        --target-dir) target_directory=$2; shift 2 ;;\n"
+                "        --manifest-path) manifest=$2; shift 2 ;;\n"
+                "        *) shift ;;\n"
+                "    esac\n"
+                "done\n"
+                "test -f \"$manifest\"\n"
+                "test -n \"$target_directory\"\n"
+                "printf '%s\\n' \"$manifest\" >> \"$LONGPIPE_TEST_CARGO_LOG\"\n"
+                "mkdir -p \"$target_directory/release\"\n"
+                "for binary in copy_pbWDL shrink_fire_bed; do\n"
+                "    printf '#!/bin/sh\\nexit 0\\n' "
+                "> \"$target_directory/release/$binary\"\n"
+                "    chmod +x \"$target_directory/release/$binary\"\n"
+                "done\n",
+                encoding="utf-8",
+            )
+            fake_cargo.chmod(0o755)
+            environment["PATH"] = f"{inputs}{os.pathsep}{environment['PATH']}"
+            environment["LONGPIPE_TEST_CARGO_LOG"] = str(cargo_calls)
+            command = [
+                "snakemake",
+                "build_rust_tools",
+                "--snakefile",
+                str(workflow_root / "Snakefile"),
+                "--configfile",
+                str(config_path),
+                "--cores",
+                "1",
+            ]
+
+            def run(*arguments):
+                completed = subprocess.run(
+                    [*command, *arguments],
+                    cwd=run_directory,
+                    env=environment,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stdout)
+                return completed
+
+            first = run()
+            self.assertIn("rule build_rust_tools", first.stdout)
+            for binary in ("copy_pbWDL", "shrink_fire_bed"):
+                output = (
+                    scratch_directory
+                    / "intermediate"
+                    / "longpipe-tools"
+                    / "bin"
+                    / binary
+                )
+                self.assertTrue(output.is_file())
+                self.assertTrue(os.access(output, os.X_OK))
+            self.assertEqual(len(cargo_calls.read_text().splitlines()), 1)
+
+            unchanged = run()
+            self.assertIn("Nothing to be done", unchanged.stdout)
+            self.assertNotIn("rule build_rust_tools", unchanged.stdout)
+
+            source = workflow_root / "tools" / "rust" / "src" / "copy_pbwdl.rs"
+            contents = source.read_bytes()
+            source.write_bytes(contents)
+            touched = run()
+            self.assertIn("Nothing to be done", touched.stdout)
+            self.assertNotIn("rule build_rust_tools", touched.stdout)
+            self.assertEqual(len(cargo_calls.read_text().splitlines()), 1)
+
+            source.write_bytes(contents + b"\n// Source change for rebuild regression.\n")
+            changed = run("--dry-run")
+            self.assertIn("rule build_rust_tools", changed.stdout)
+            self.assertIn("Params have changed", changed.stdout)
+            run()
+            self.assertEqual(len(cargo_calls.read_text().splitlines()), 2)
+
     def test_targeting_one_sample_publication_does_not_require_other_sample(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

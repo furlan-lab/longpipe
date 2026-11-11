@@ -73,7 +73,6 @@ RUST_TOOL_SOURCE_PATHS = (
 (RUST_TOOL_SOURCES, RUST_TOOL_SOURCES_SHA256) = tracked_sources(
     RUST_TOOL_SOURCE_PATHS
 )
-RUST_TOOL_MANIFEST = str(workflow.source_path("tools/rust/Cargo.toml"))
 
 validate(config, CONFIG_SCHEMA)
 
@@ -1078,7 +1077,8 @@ rule fire_eligibility_report:
 
 rule build_rust_tools:
     input:
-        sources=RUST_TOOL_SOURCES
+        manifest=RUST_TOOL_SOURCES[0],
+        sources=RUST_TOOL_SOURCES[1:]
     output:
         copy_pbwdl=COPY_PBWDL,
         shrink_fire_bed=SHRINK_FIRE_BED
@@ -1087,7 +1087,6 @@ rule build_rust_tools:
         mem_mb=8000,
         runtime=30
     params:
-        manifest=RUST_TOOL_MANIFEST,
         source_sha256=RUST_TOOL_SOURCES_SHA256,
         target=RUST_TOOL_TARGET
     log:
@@ -1107,7 +1106,7 @@ rule build_rust_tools:
             --release \
             --bins \
             --jobs {threads} \
-            --manifest-path {params.manifest:q} \
+            --manifest-path {input.manifest:q} \
             --target-dir {params.target:q} \
             > {log:q} 2>&1
         install -m 0755 \
