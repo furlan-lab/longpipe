@@ -97,9 +97,12 @@ MiniWDL remains externally managed because it requires site scheduler
 configuration. FIRE's pileup-producing DAG is maintained in Longpipe and uses
 the pinned per-rule environments in `envs/fire-core.yaml` and
 `envs/fire-python.yaml`; users do not install or run a shared FIRE Pixi
-environment. The `copy_pbWDL` and `shrink_fire_bed` executables from
-pacbiowdlR remain external. Set their executable and resource paths in each
-run's `config.yaml`.
+environment. Longpipe includes the Rust sources for `copy_pbWDL` and
+`shrink_fire_bed`. Snakemake builds their locked crate once in the retained
+scratch run with `envs/rust-tools.yaml`, so run configurations do not contain
+paths to separately installed helper binaries. The legacy `copy_pbwdl_tool`
+and `shrink_fire_bed_tool` settings are accepted but ignored, allowing existing
+run configurations to resume without modification.
 
 The native FIRE rules reproduce the pileup path from upstream FIRE commit
 `e7f2aae1f59bbb74c46e1f27936da380cb074704` (`v0.1.2`). Vendored FIRE code is
@@ -273,7 +276,7 @@ Reuse a completed PacBio WDL run with:
 
 ```csv
 core_name,lab_name,run,cell,barcode,hifi_bam,input_stage,pbwgs_outputs_json,sex,hia5,fiberseq_input
-LL1_S1,,,,,,pbwgs,/path/to/pacbiowdlR/outputs.json,F,yes,auto
+LL1_S1,,,,,,pbwgs,/path/to/pbWGS/outputs.json,F,yes,auto
 ```
 
 The reused manifest may be MiniWDL's flat output object or an object containing
@@ -502,4 +505,10 @@ Run the CLI tests with:
 
 ```bash
 python -m unittest discover -s tests -v
+```
+
+Run the native-tool tests with:
+
+```bash
+cargo test --locked --manifest-path tools/rust/Cargo.toml
 ```

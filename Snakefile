@@ -28,6 +28,17 @@ def tracked_script(path):
     return ancient(script), f"sha256:{digest}"
 
 
+def tracked_sources(paths):
+    sources = [workflow.source_path(path) for path in paths]
+    digest = hashlib.sha256()
+    for path, source in zip(paths, sources):
+        digest.update(path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(Path(str(source)).read_bytes())
+        digest.update(b"\0")
+    return [ancient(source) for source in sources], f"sha256:{digest.hexdigest()}"
+
+
 (
     VALIDATE_REANALYSIS_SCRIPT,
     VALIDATE_REANALYSIS_SCRIPT_SHA256,
@@ -50,6 +61,19 @@ def tracked_script(path):
     FIRE_HAPLOTYPE_DIFFERENCES_SCRIPT,
     FIRE_HAPLOTYPE_DIFFERENCES_SCRIPT_SHA256,
 ) = tracked_script("workflow/scripts/fire_haplotype_differences.py")
+RUST_TOOL_SOURCE_PATHS = (
+    "tools/rust/Cargo.toml",
+    "tools/rust/Cargo.lock",
+    "tools/rust/src/lib.rs",
+    "tools/rust/src/copy_pbwdl.rs",
+    "tools/rust/src/shrink_fire_bed.rs",
+    "tools/rust/src/bin/copy_pbwdl.rs",
+    "tools/rust/src/bin/shrink_fire_bed.rs",
+)
+(RUST_TOOL_SOURCES, RUST_TOOL_SOURCES_SHA256) = tracked_sources(
+    RUST_TOOL_SOURCE_PATHS
+)
+RUST_TOOL_MANIFEST = str(workflow.source_path("tools/rust/Cargo.toml"))
 
 validate(config, CONFIG_SCHEMA)
 
@@ -128,8 +152,9 @@ EXPECTED_CN = {
     "FEMALE": configured_path(config["expected_cn_xx"]),
 }
 
-COPY_PBWDL = configured_path(config["copy_pbwdl_tool"])
-SHRINK_FIRE_BED = configured_path(config["shrink_fire_bed_tool"])
+COPY_PBWDL = "intermediate/longpipe-tools/bin/copy_pbWDL"
+SHRINK_FIRE_BED = "intermediate/longpipe-tools/bin/shrink_fire_bed"
+RUST_TOOL_TARGET = "intermediate/longpipe-tools/target"
 MINIWDL = configured_executable(config["miniwdl_executable"])
 FT_PREDICT_CONFIGURED = config.get("ft_predict_executable", "ft")
 FT_PREDICT_BACKEND = config.get("ft_predict_backend")
@@ -1049,6 +1074,49 @@ rule fire_eligibility_report:
             )
             temporary.write_text(report, encoding="utf-8")
             os.replace(temporary, destination)
+
+
+rule build_rust_tools:
+    input:
+        sources=RUST_TOOL_SOURCES
+    output:
+        copy_pbwdl=COPY_PBWDL,
+        shrink_fire_bed=SHRINK_FIRE_BED
+    threads: 4
+    resources:
+        mem_mb=8000,
+        runtime=30
+    params:
+        manifest=RUST_TOOL_MANIFEST,
+        source_sha256=RUST_TOOL_SOURCES_SHA256,
+        target=RUST_TOOL_TARGET
+    log:
+        "logs/build_rust_tools.log"
+    benchmark:
+        "benchmarks/build_rust_tools.tsv"
+    conda:
+        "envs/rust-tools.yaml"
+    shell:
+        """
+        mkdir -p \
+            {params.target:q} \
+            "$(dirname {output.copy_pbwdl:q})" \
+            "$(dirname {log:q})"
+        cargo build \
+            --locked \
+            --release \
+            --bins \
+            --jobs {threads} \
+            --manifest-path {params.manifest:q} \
+            --target-dir {params.target:q} \
+            > {log:q} 2>&1
+        install -m 0755 \
+            {params.target:q}/release/copy_pbWDL \
+            {output.copy_pbwdl:q}
+        install -m 0755 \
+            {params.target:q}/release/shrink_fire_bed \
+            {output.shrink_fire_bed:q}
+        """
 
 
 rule copy_pbwdl:

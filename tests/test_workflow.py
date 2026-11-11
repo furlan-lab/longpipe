@@ -65,6 +65,28 @@ class ConfigSchemaTest(unittest.TestCase):
             ["conda", "external"],
         )
 
+    def test_native_rust_tools_are_built_by_the_workflow(self):
+        schema = yaml.safe_load(
+            (REPOSITORY_ROOT / "schemas" / "config.schema.yaml").read_text()
+        )
+        config = yaml.safe_load(
+            (REPOSITORY_ROOT / "config" / "config.yaml").read_text()
+        )
+        for key in ("copy_pbwdl_tool", "shrink_fire_bed_tool"):
+            self.assertNotIn(key, schema["required"])
+            self.assertTrue(schema["properties"][key]["deprecated"])
+            self.assertNotIn(key, config)
+
+        rust_environment = yaml.safe_load(
+            (REPOSITORY_ROOT / "envs" / "rust-tools.yaml").read_text()
+        )
+        self.assertIn("rust=1.85.1", rust_environment["dependencies"])
+
+        snakefile = (REPOSITORY_ROOT / "Snakefile").read_text(encoding="utf-8")
+        self.assertIn("rule build_rust_tools:", snakefile)
+        self.assertIn("cargo build", snakefile)
+        self.assertIn("--locked", snakefile)
+
     def test_runsheet_accepts_explicit_fiberseq_input_types(self):
         from jsonschema import Draft202012Validator
 
@@ -976,6 +998,7 @@ class WorkflowDagTest(unittest.TestCase):
             validation_run.stdout,
         )
         self.assertIn("rule copy_pbwdl", completed.stdout)
+        self.assertIn("rule build_rust_tools", completed.stdout)
         self.assertNotIn("rule hifi_wgs", completed.stdout)
 
     def test_reanalysis_outputs_json_shell_handles_optional_path(self):
@@ -1128,6 +1151,7 @@ fi
                 "fire_pileup_chromosome",
                 "fire_fdr_track_chromosome",
                 "fire_pileup",
+                "build_rust_tools",
                 "fire_bigwig",
                 "fire_haplotype_tracks",
                 "fire_haplotype_differences",
@@ -1182,8 +1206,6 @@ fi
             "cnv.bed.gz",
             "xx.bed",
             "xy.bed",
-            "copy_pbWDL",
-            "shrink_fire_bed",
         ]
         for name in input_names:
             (inputs / name).touch()
@@ -1266,8 +1288,6 @@ fi
             "ft_predict_executable": "ft",
             "fiberseq_detection_reads": 5000,
             "fiberseq_detection_min_fraction": 0.5,
-            "copy_pbwdl_tool": "inputs/copy_pbWDL",
-            "shrink_fire_bed_tool": "inputs/shrink_fire_bed",
         }
         config_path = invocation / "config.yaml"
         config_path.write_text(

@@ -5,4 +5,5 @@ __pycache__/
 /.snakemake/
 /build/
 /dist/
+/tools/rust/target/
 .DS_Store

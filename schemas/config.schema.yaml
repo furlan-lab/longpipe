@@ -17,8 +17,6 @@ required:
   - cnv_excluded_regions
   - expected_cn_xx
   - expected_cn_xy
-  - copy_pbwdl_tool
-  - shrink_fire_bed_tool
 properties:
   rawdir:
     type: string
@@ -170,6 +168,10 @@ properties:
   copy_pbwdl_tool:
     type: string
     minLength: 1
+    deprecated: true
+    description: Ignored legacy setting; Longpipe builds this tool from source.
   shrink_fire_bed_tool:
     type: string
     minLength: 1
+    deprecated: true
+    description: Ignored legacy setting; Longpipe builds this tool from source.
